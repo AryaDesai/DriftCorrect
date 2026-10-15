@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DriftCorrect}",
+            "name": "Debug dc",
+            "target": "dc",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug dc"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DriftCorrect}",
+            "name": "Release dc",
+            "target": "dc",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release dc"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DriftCorrect}",
+            "name": "Debug DriftCorrectApp",
+            "target": "DriftCorrectApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug DriftCorrectApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DriftCorrect}",
+            "name": "Release DriftCorrectApp",
+            "target": "DriftCorrectApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release DriftCorrectApp"
+        }
+    ]
+}

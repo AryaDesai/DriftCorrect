@@ -1,0 +1,14 @@
+parameters:
+  channel: Venus
+  channel_index: 0
+  sigma: 2
+  percentile: 85.0
+  method: percentile
+  invert: false
+source:
+  file: /home/claude/DriftCorrect/Tests/DCCoreTests/Resources/reference/align/P0_concat.ome.tif
+  image_shape:
+    T: 6
+    P: 1
+    Y: 40
+    X: 48
