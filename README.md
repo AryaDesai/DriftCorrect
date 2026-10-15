@@ -2,7 +2,7 @@
 ### Create a conda environment by pasting the below command into Anaconda Promp
 `conda create -y -n driftcorrect python=3.11`
 
-conda activate driftcorrect
+`conda activate driftcorrect`
 ### Go to the folder you want to install this package in and then download and unpack the code from github
 `curl -L -o DriftCorrect.zip https://github.com/AryaDesai/DriftCorrect/archive/refs/heads/main.zip`
 
