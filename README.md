@@ -26,6 +26,7 @@ conda activate driftcorrect
 
 ### Check if it worked:
 `python -c "from backend import get_backend; print(get_backend().name)"`
+
 `python drift_correct.py`
 
 
