@@ -1,19 +1,19 @@
 # How to install for windows (temporary)
 ### Create a conda environment by pasting the below command into Anaconda Promp
-conda create -y -n driftcorrect python=3.11
+`conda create -y -n driftcorrect python=3.11`
 
 conda activate driftcorrect
 ### Go to the folder you want to install this package in and then download and unpack the code from github
-curl -L -o DriftCorrect.zip https://github.com/AryaDesai/DriftCorrect/archive/refs/heads/main.zip
+`curl -L -o DriftCorrect.zip https://github.com/AryaDesai/DriftCorrect/archive/refs/heads/main.zip`
 
-tar -xf DriftCorrect.zip
+`tar -xf DriftCorrect.zip`
 
 ### Make a directory called DriftCorrect to store the code and clean up the downloads
-move DriftCorrect-main\DriftCorrectPy_windows DriftCorrect && rmdir /s /q DriftCorrect-main && 
+`curl -L -o DriftCorrect.zip https://github.com/AryaDesai/DriftCorrect/archive/refs/heads/main.zip
+tar -xf DriftCorrect.zip
+move DriftCorrect-main\DriftCorrectPy_windows DriftCorrect && rmdir /s /q DriftCorrect-main && del DriftCorrect.zip
+cd DriftCorrect`
 
-del DriftCorrect.zip
-
-cd DriftCorrect
 
 ### Install the required packages
 pip install -r requirements.txt
