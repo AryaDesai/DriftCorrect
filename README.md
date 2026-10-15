@@ -1,6 +1,6 @@
 # How to install for windows (temporary)
 ### Create a conda environment by pasting the below command into Anaconda Promp
-`conda create -y -n driftcorrect python=3.11`
+`conda create -y -n driftcorrect python=3.12`
 
 `conda activate driftcorrect`
 ### Go to the folder you want to install this package in and then download and unpack the code from github
