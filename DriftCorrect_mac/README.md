@@ -1,10 +1,9 @@
 # DriftCorrect for Apple silicon
 
 This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `find_threshold.py`,
-`centroid_align_xy.py`, their GUIs, and the manual-shift helpers in
-`useful_functions.py`). It contains:
+`centroid_align_xy.py`, and their GUIs). It contains:
 
-- **DriftCorrect.app**: a SwiftUI app. It has the launcher and four tool windows: Convert ND2 to TIFF, Mask embryo, Align movie, and Manual XY shift.
+- **DriftCorrect.app**: a SwiftUI app. It has the launcher and three tool windows: Convert ND2 to TIFF, Mask embryo, and Align movie.
 - **dc**: a command-line tool. `dc convert` and `dc align` accept the same arguments as the Python workers.
 
 No Python, FFmpeg, or other runtime is necessary.
@@ -34,32 +33,11 @@ To work in Xcode, open `Package.swift`, select the `DriftCorrectApp` scheme, and
 ```bash
 dc convert /path/to/nd2_folder [--output_dir DIR] [--position 0] [--parallel false] [--concat_only]
 dc align P0_Venus_threshold.yaml [--use_nd2] [--fps 2] [--no_enlarge_canvas] [--use_gpu] [--low_memory]
-dc manual-xy --tif P0_concat.ome.tif --row 0,5,120,130,118,141 [--row …]
 dc nd2-info file.nd2 --checksums          # metadata and frame checksums as JSON
 dc bench                                  # CPU vs Metal timing
 ```
 
-Add `--cpu` to `align` or `manual-xy` to use the CPU reference instead of Metal.
-
-## Manual XY window
-
-Load a TIFF (or its threshold YAML). The left pane shows timepoint `t` and the right
-pane shows `t+1`. Browse both with the shared time slider or Previous/Next buttons.
-Each pane has its own Z slider. Timepoints and slices use zero-based indices.
-
-Select the same landmark in both panes, then choose **Preview correction** and
-**Accept correction**. Each accepted correction applies to the moving timepoint
-and every later timepoint, across all channels and Z slices. Additional corrections
-accumulate. **Remove correction here** removes only the current boundary's offset.
-Selecting landmarks again at an already corrected boundary adds the remaining
-displacement to that boundary's correction.
-
-Navigation or display-setting changes discard an unaccepted preview. Display
-smoothing is optional and does not affect exported intensities. Export applies the
-cumulative offset once to each original frame and writes the existing OME-TIFF and
-per-channel movie outputs. Corrections remain in the window until another file is
-loaded or the window's state is discarded; there is no saved correction-session file.
-The `dc manual-xy` CLI retains its existing per-target row behavior.
+Add `--cpu` to `align` to use the CPU reference instead of Metal.
 
 ## Check the ND2 reader on your own files
 
@@ -110,24 +88,23 @@ Resolved as agreed:
 2. **Blur and shift.** The blur always uses scipy's rules. The shift mode is a choice:
    - sub-pixel (as the Python CPU path)
    - whole-pixel (as the Python GPU path)
-3. **Manual XY shift.** This now has a window and a CLI command.
 
 Defects fixed:
 
-4. **`--use_nd2` crash.** The run no longer stops with a `NameError` at the movie step.
-5. **Missing import.** `align_frame_xy` and the manual-shift functions used `scipy.ndimage.shift` without an import. As a result, `--no_enlarge_canvas` failed on the CPU path.
-6. **Single channel or single Z-slice.** Files with one channel or one Z-slice now load. tifffile removes singleton axes, so `T, C, Z, Y, X = series.shape` failed.
-7. **ND2 axis order.** ND2 files are read by axis name. The Python code assumed the loop order T, P, Z.
-8. **Mask tool preview.** The preview now smooths ND2 data in float32, as alignment does. Before, it smoothed uint16 data, and the result was truncated to uint16.
+3. **`--use_nd2` crash.** The run no longer stops with a `NameError` at the movie step.
+4. **Missing import.** `align_frame_xy` and the manual-shift functions used `scipy.ndimage.shift` without an import. As a result, `--no_enlarge_canvas` failed on the CPU path.
+5. **Single channel or single Z-slice.** Files with one channel or one Z-slice now load. tifffile removes singleton axes, so `T, C, Z, Y, X = series.shape` failed.
+6. **ND2 axis order.** ND2 files are read by axis name. The Python code assumed the loop order T, P, Z.
+7. **Mask tool preview.** The preview now smooths ND2 data in float32, as alignment does. Before, it smoothed uint16 data, and the result was truncated to uint16.
 
 Other changes:
 
-9. **Concatenated TIFFs** keep uint16. The values are unchanged, and the files are half the size.
-10. **Metadata warnings.** The concatenation compares channel names and calibration. The Python code compared the raw OME-XML, and it always warned, because every file has its own UUID.
-11. **File names.**
+8. **Concatenated TIFFs** keep uint16. The values are unchanged, and the files are half the size.
+9. **Metadata warnings.** The concatenation compares channel names and calibration. The Python code compared the raw OME-XML, and it always warned, because every file has its own UUID.
+10. **File names.**
     - The unaligned movie is `{stem}_{channel}_unaligned.mp4` in both canvas modes.
-12. **Closing a tool window** does not stop a run. Quitting the app asks for confirmation first.
-13. **Legacy ND2 files** (JPEG 2000, format 1.0) and RGB ND2 files show an error message.
+11. **Closing a tool window** does not stop a run. Quitting the app asks for confirmation first.
+12. **Legacy ND2 files** (JPEG 2000, format 1.0) and RGB ND2 files show an error message.
 
 ## Code layout
 

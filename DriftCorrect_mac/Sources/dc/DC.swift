@@ -14,7 +14,7 @@ struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dc",
         abstract: "Embryo drift-correction tools (Apple silicon).",
-        subcommands: [Convert.self, Align.self, ManualXY.self, ND2Info.self, Bench.self])
+        subcommands: [Convert.self, Align.self, ND2Info.self, Bench.self])
 }
 
 struct BackendOption: ParsableArguments {
@@ -121,41 +121,6 @@ struct Align: ParsableCommand {
         _ = try AlignPipeline(options: o, backend: backend.make(), movies: noMovies ? nil : (HEVCMovieFactory() as MovieWriterFactory),
                               context: consoleContext()).run()
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
-    }
-}
-
-struct ManualXY: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "manual-xy", abstract: "Apply manual XY shifts to a TIF.")
-
-    @Option(help: "Input OME-TIFF.") var tif: String?
-    @Option(help: "Threshold YAML (the TIF is found as the Align tool finds it).") var yaml: String?
-    @Option(name: .customLong("row"), help: "t1,t2,y1,x1,y2,x2 : point (y1,x1) at t1 matches (y2,x2) at t2. Repeat for more rows.")
-    var rows: [String] = []
-    @Option(name: .customLong("shift-mode")) var shiftMode: String = "subpixel"
-    @Flag(name: .customLong("no-enlarge-canvas")) var noEnlargeCanvas = false
-    @Flag(name: .customLong("low-memory")) var lowMemory = false
-    @Option var fps: Double = 2
-    @Flag var noMovies = false
-    @OptionGroup var backend: BackendOption
-
-    func run() throws {
-        let tifURL: URL
-        if let t = tif { tifURL = URL(fileURLWithPath: t) }
-        else if let y = yaml { tifURL = try ManualXYPipeline.tif(forYAML: URL(fileURLWithPath: y)) }
-        else { throw ValidationError("Give --tif or --yaml") }
-        let parsed = try rows.map { r -> ManualRow in
-            let v = r.split(separator: ",").map { Double($0.trimmingCharacters(in: .whitespaces)) }
-            guard v.count == 6, v.allSatisfy({ $0 != nil }) else { throw ValidationError("Bad --row \(r)") }
-            return ManualRow(t1: Int(v[0]!), t2: Int(v[1]!), p1: (v[2]!, v[3]!), p2: (v[4]!, v[5]!))
-        }
-        var o = ManualXYOptions(rows: parsed)
-        guard let mode = ShiftMode(rawValue: shiftMode) else { throw ValidationError("shift-mode must be subpixel or integer") }
-        o.shiftMode = mode
-        o.enlargeCanvas = !noEnlargeCanvas
-        o.lowMemory = lowMemory
-        o.fps = fps
-        try ManualXYPipeline.run(tif: tifURL, options: o, backend: backend.make(),
-                                 movies: noMovies ? nil : (HEVCMovieFactory() as MovieWriterFactory), context: consoleContext())
     }
 }
 
