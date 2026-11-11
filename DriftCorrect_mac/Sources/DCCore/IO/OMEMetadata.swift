@@ -11,6 +11,11 @@ public struct ImageMetadata: Equatable, Sendable {
     public var physicalSizeYUnit: String? = "µm"
     public var physicalSizeZUnit: String? = "µm"
     public var timeIncrementUnit: String? = "s"
+    /// Microscope stage z (µm) of the first slice of every timepoint. nil when the file does not record it.
+    /// Z correction uses the change between timepoints as its starting estimate.
+    public var stageZ: [Double]?
+    /// Signed stage z change from one slice to the next (µm); negative when the stack was acquired top-down.
+    public var stageZStep: Double?
 
     public init(channelNames: [String], physicalSizeX: Double? = nil, physicalSizeY: Double? = nil,
                 physicalSizeZ: Double? = nil, timeIncrement: Double? = nil) {
@@ -28,6 +33,14 @@ public struct ImageMetadata: Equatable, Sendable {
     }
 
     public var voxel: VoxelSize { VoxelSize(x: physicalSizeX ?? 1, y: physicalSizeY ?? 1, z: physicalSizeZ ?? 1) }
+
+    /// The same metadata without stage positions (they differ between files of one experiment).
+    public var withoutStagePositions: ImageMetadata {
+        var m = self
+        m.stageZ = nil
+        m.stageZStep = nil
+        return m
+    }
 }
 
 public struct VoxelSize: Equatable, Sendable {
@@ -45,6 +58,9 @@ public struct OMEPixels: Equatable, Sendable {
     public var attributes: [String: String] = [:]
     public var channelNames: [String?] = []
     public var firstIFD = 0
+    /// `Plane@PositionZ` of channel 0 by timepoint, for slice 0 and slice 1.
+    public var positionZSlice0: [Int: Double] = [:]
+    public var positionZSlice1: [Int: Double] = [:]
 }
 
 public enum OMEXML {
@@ -91,6 +107,15 @@ public enum OMEXML {
             } else if inPixels && name == "TiffData" && !sawTiffData {
                 sawTiffData = true
                 pixels?.firstIFD = Int(attributes["IFD"] ?? "0") ?? 0
+            } else if inPixels && name == "Plane" {
+                guard (Int(attributes["TheC"] ?? "0") ?? 0) == 0,
+                      let pz = attributes["PositionZ"].flatMap({ Double($0) }), pz.isFinite else { return }
+                let t = Int(attributes["TheT"] ?? "0") ?? 0
+                switch Int(attributes["TheZ"] ?? "0") ?? 0 {
+                case 0: pixels?.positionZSlice0[t] = pz
+                case 1: pixels?.positionZSlice1[t] = pz
+                default: break
+                }
             }
         }
 
@@ -121,6 +146,14 @@ public enum OMEXML {
         m.physicalSizeYUnit = pixels.attributes["PhysicalSizeYUnit"] ?? "µm"
         m.physicalSizeZUnit = pixels.attributes["PhysicalSizeZUnit"] ?? "µm"
         m.timeIncrementUnit = pixels.attributes["TimeIncrementUnit"] ?? "s"
+        // Stage positions count only when every timepoint has one.
+        let z0 = (0..<pixels.sizeT).compactMap { pixels.positionZSlice0[$0] }
+        if z0.count == pixels.sizeT && pixels.sizeT > 0 {
+            m.stageZ = z0
+            if let t = pixels.positionZSlice1.keys.min(), let a = pixels.positionZSlice0[t], let b = pixels.positionZSlice1[t] {
+                m.stageZStep = b - a
+            }
+        }
         return m
     }
 
@@ -156,7 +189,18 @@ public enum OMEXML {
             let name = ci < m.channelNames.count ? " Name=\"\(escape(m.channelNames[ci]))\"" : ""
             px += "<Channel ID=\"Channel:0:\(ci)\" SamplesPerPixel=\"1\"\(name)><LightPath/></Channel>"
         }
-        px += "<TiffData IFD=\"0\" PlaneCount=\"\(t * c * z)\"/></Pixels>"
+        px += "<TiffData IFD=\"0\" PlaneCount=\"\(t * c * z)\"/>"
+        // Stage z of every slice of channel 0 (standard OME `Plane@PositionZ`), when the microscope recorded it.
+        if let stage = m.stageZ, stage.count == t {
+            let slices = m.stageZStep == nil ? 1 : z
+            for ti in 0..<t {
+                for zi in 0..<slices {
+                    let pz = stage[ti] + Double(zi) * (m.stageZStep ?? 0)
+                    px += "<Plane TheC=\"0\" TheT=\"\(ti)\" TheZ=\"\(zi)\" PositionZ=\"\(PyFormat.repr(pz))\" PositionZUnit=\"µm\"/>"
+                }
+            }
+        }
+        px += "</Pixels>"
         let uuid = UUID().uuidString.lowercased()
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
             + "<OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\""

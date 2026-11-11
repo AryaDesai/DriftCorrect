@@ -10,6 +10,8 @@ public protocol FrameSource: AnyObject {
     var x: Int { get }
     var sampleType: SampleType { get }
     var metadata: ImageMetadata { get }
+    /// Metadata of one position, with its stage z positions when the file records them.
+    func metadata(position p: Int) -> ImageMetadata
     func readFrame(t: Int, p: Int) throws -> Volume
 }
 
@@ -30,9 +32,13 @@ public final class TIFFSource: FrameSource {
     public var sampleType: SampleType { stack.sampleType }
     public var metadata: ImageMetadata {
         // `save_ome_tiff` always writes µm and s units.
-        ImageMetadata.standard(channelNames: stack.metadata.channelNames, voxel: stack.metadata.voxel,
-                               period: stack.metadata.timeIncrement)
+        var m = ImageMetadata.standard(channelNames: stack.metadata.channelNames, voxel: stack.metadata.voxel,
+                                       period: stack.metadata.timeIncrement)
+        m.stageZ = stack.metadata.stageZ
+        m.stageZStep = stack.metadata.stageZStep
+        return m
     }
+    public func metadata(position p: Int) -> ImageMetadata { metadata }
     public func readFrame(t: Int, p: Int) throws -> Volume { try stack.readFrame(t) }
 }
 
@@ -48,6 +54,7 @@ public final class ND2Source: FrameSource {
     public var x: Int { file.sizeX }
     public var sampleType: SampleType { file.sampleType }
     public var metadata: ImageMetadata { file.metadata }
+    public func metadata(position p: Int) -> ImageMetadata { file.metadata(position: p) }
     public func readFrame(t: Int, p: Int) throws -> Volume { try file.readFrame(t: t, p: p) }
 }
 

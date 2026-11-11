@@ -33,11 +33,61 @@ To work in Xcode, open `Package.swift`, select the `DriftCorrectApp` scheme, and
 ```bash
 dc convert /path/to/nd2_folder [--output_dir DIR] [--position 0] [--parallel false] [--concat_only]
 dc align P0_Venus_threshold.yaml [--use_nd2] [--fps 2] [--no_enlarge_canvas] [--use_gpu] [--low_memory]
+dc align P0_Venus_threshold.yaml --z-correct [--z-channel mCherry] [--z-region mask|whole|box] [--z-box x,y,w,h]
+dc z-shifts P0_concat.ome.tif --z-channel mCherry   # measure z drift only and save a CSV
 dc nd2-info file.nd2 --checksums          # metadata and frame checksums as JSON
 dc bench                                  # CPU vs Metal timing
 ```
 
 Add `--cpu` to `align` to use the CPU reference instead of Metal.
+
+## Z correction
+
+The Align tool can also correct drift in z. It runs after the xy alignment. In the app, tick
+**Correct z drift (after xy)**; on the command line, add `--z-correct`.
+
+Each timepoint is compared with the one before it, in three steps:
+
+1. **Stage position.** The microscope records the stage z of every frame. When imaging is paused and the
+   embryo is re-centred in z, the change in stage z gives the size of the jump, even when the two stacks
+   no longer overlap.
+2. **Image comparison.** The slices of the two timepoints are compared at every offset near the stage
+   estimate, with a small xy search. The offset where the images differ least wins (sum of absolute
+   differences, not cross-correlation).
+3. **Nuclei.** Nucleus centres are detected in both timepoints and matched. When at least 30% of them agree
+   on one movement, the median of their z movements replaces the image estimate.
+
+The correction moves whole slices; nothing is interpolated. Empty (zero) slices fill the gaps, and the stack
+grows so that no slice is lost, as the xy canvas does. The first timepoint keeps its slices; every other
+timepoint moves to match it (`ZCorrectionOptions.referenceTimepoint` in the code).
+
+Settings:
+
+- **Z channel**: the channel to follow. A nuclear marker works best, because its pattern does not change
+  with an oscillating reporter. The default is the threshold channel of the YAML; the app starts on a
+  channel named like a nuclear marker (mCherry, H2B, …) when there is one.
+- **Follow**: the embryo mask from the YAML, the whole frame, or a box that you draw over cells that
+  should stay in the same slice (`--z-box x,y,width,height` in pixels of the first timepoint).
+
+Outputs, next to the usual ones:
+
+- `{name}_xy_z.ome.tif`: the corrected stack. `{name}_xy.ome.tif` is not written in the same run.
+- `{name}_xy_z_shifts.csv`: one row per timepoint with the stage z, the three estimates, the value used,
+  the whole-slice shift, and a flag for timepoints that need a look (`weak match`, `stage only`).
+- The movies are max projections over z, so z correction does not change them.
+
+Things to know:
+
+- **Stage positions come from Convert.** The Convert tool now stores the stage z in the OME-TIFF (as the
+  standard `Plane` `PositionZ`), and concatenation and alignment keep it. TIFFs converted before this
+  change have none; z correction then uses the images alone and cannot measure a jump larger than the
+  stack. Convert the ND2 files again to get them, or use **Load directly from the raw ND2 file**.
+- **The file grows.** A movie whose embryo was re-centred several times needs many empty slices. For
+  example, jumps of 26, 15, 14, -4 and 6 slices turn a 27-slice stack into about 70 slices.
+- **Without "Enlarge canvas"** the stack keeps its depth and slices that leave it are dropped.
+
+`dc z-shifts FILE` measures the drift of a TIFF or ND2 and saves the CSV without writing a stack. It applies
+no xy alignment, so use it on files that are already steady in xy, or to preview the drift.
 
 ## Check the ND2 reader on your own files
 
@@ -105,6 +155,8 @@ Other changes:
     - The unaligned movie is `{stem}_{channel}_unaligned.mp4` in both canvas modes.
 11. **Closing a tool window** does not stop a run. Quitting the app asks for confirmation first.
 12. **Legacy ND2 files** (JPEG 2000, format 1.0) and RGB ND2 files show an error message.
+13. **Z correction** is new; the Python scripts in this repository have none. See "Z correction" above.
+14. **Stage z positions** from the ND2 file are stored in every OME-TIFF.
 
 ## Code layout
 

@@ -67,6 +67,8 @@ public final class ND2File: @unchecked Sendable {
     public private(set) var loopAxes: [Character] = []
     private var loopCounts: [Int] = []
     private var frameChunkOffsets: [Int: UInt64] = [:]
+    /// Stage z (µm) of every stored frame by sequence index (the `CustomData|Z!` chunk); nil when absent.
+    public private(set) var stageZBySequence: [Double]?
 
     public init(url: URL) throws {
         self.url = url
@@ -178,6 +180,40 @@ public final class ND2File: @unchecked Sendable {
             let digits = key.dropFirst("ImageDataSeq|".count).dropLast()
             if let i = Int(digits) { frameChunkOffsets[i] = offset }
         }
+
+        // Stage z per frame: little-endian float64, one per sequence index.
+        if let offset = chunkMap["CustomData|Z!"], let data = try? readChunk(at: offset), data.count >= 8 {
+            let r = ByteReader(data)
+            stageZBySequence = (0..<data.count / 8).map { r.f64(at: $0 * 8) }
+        }
+    }
+
+    /// Stage z of the first slice of every timepoint of position `p`, and the signed z step between slices.
+    /// nil when the file has no usable stage positions.
+    public func stagePositions(p: Int) -> (z: [Double], step: Double?)? {
+        guard let all = stageZBySequence else { return nil }
+        var z0: [Double] = []
+        for t in 0..<sizeT {
+            let i = sequenceIndex(t: t, p: p, z: 0)
+            guard i < all.count, all[i].isFinite else { return nil }
+            z0.append(all[i])
+        }
+        var step: Double?
+        if sizeZ > 1 {
+            let a = sequenceIndex(t: 0, p: p, z: 0), b = sequenceIndex(t: 0, p: p, z: 1)
+            if b < all.count, all[b].isFinite { step = all[b] - all[a] }
+        }
+        return (z0, step)
+    }
+
+    /// Metadata of position `p`, including its stage z positions.
+    public func metadata(position p: Int) -> ImageMetadata {
+        var m = metadata
+        if let s = stagePositions(p: p) {
+            m.stageZ = s.z
+            m.stageZStep = s.step
+        }
+        return m
     }
 
     // MARK: Chunks

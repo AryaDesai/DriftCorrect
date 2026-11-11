@@ -30,7 +30,7 @@ public enum TIFFConcat {
             for (i, s) in stacks.enumerated().dropFirst() {
                 if s.omeXML == nil {
                     context.log("Warning: \(sorted[i].lastPathComponent) has no OME metadata")
-                } else if s.metadata != ref.metadata {
+                } else if s.metadata.withoutStagePositions != ref.metadata.withoutStagePositions {
                     context.log("Warning: OME metadata in \(sorted[i].lastPathComponent) differs from \(firstURL.lastPathComponent)")
                 }
             }
@@ -55,6 +55,15 @@ public enum TIFFConcat {
             meta.timeIncrementUnit = a["TimeIncrementUnit"]
             let names = px.channelNames.compactMap { $0 }.filter { !$0.isEmpty }
             if !names.isEmpty { meta.channelNames = names }
+        }
+
+        // Stage z positions join along T like the frames. They are kept only when every file has them.
+        let stages = stacks.map { $0.metadata.stageZ }
+        if stages.allSatisfy({ $0 != nil }) {
+            meta.stageZ = stages.flatMap { $0! }
+            meta.stageZStep = ref.metadata.stageZStep
+        } else if stages.contains(where: { $0 != nil }) {
+            context.log("Warning: some files have no stage z positions; they are left out of the joined file")
         }
 
         let sameType = stacks.allSatisfy { $0.sampleType == ref.sampleType }

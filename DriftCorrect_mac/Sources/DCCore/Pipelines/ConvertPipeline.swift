@@ -62,7 +62,6 @@ public final class ConvertPipeline {
                 targetPositions = Array(0..<P)
             }
             let base = PyFormat.stem(url)
-            let meta = nd2.metadata
             let groups: [[Int]] = (options.parallel && options.position == nil) ? [targetPositions] : targetPositions.map { [$0] }
             for group in groups {
                 var writers: [Int: OMETIFFWriter] = [:]
@@ -70,7 +69,7 @@ public final class ConvertPipeline {
                     let out = outDir.appendingPathComponent("\(base)_P\(p).ome.tif")
                     ctx.log("  Writing \(out.lastPathComponent) ...")
                     writers[p] = try OMETIFFWriter(url: out, t: T, c: C, z: Z, y: Y, x: X,
-                                                   type: nd2.sampleType, metadata: meta)
+                                                   type: nd2.sampleType, metadata: nd2.metadata(position: p))
                 }
                 // Work items in (t, p) order; each reads all Z frames of one timepoint and position.
                 let items = (0..<T).flatMap { t in group.map { (t, $0) } }

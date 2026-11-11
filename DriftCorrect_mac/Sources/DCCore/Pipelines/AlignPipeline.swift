@@ -13,6 +13,8 @@ import Foundation
 ///   TIFFs again afterwards. The frames and the contrast rule are the same.
 /// - The unaligned movie name is `{stem}_{channel}_unaligned.mp4` for both
 ///   canvas modes (the two-pass Python path produced a different name).
+/// - Optional z correction after xy (`zCorrection`): see `ZDrift`. The output is then
+///   `{stem}_xy_z.ome.tif` plus `{stem}_xy_z_shifts.csv`.
 public struct AlignOptions {
     public var yaml: URL
     public var useND2 = false
@@ -20,6 +22,8 @@ public struct AlignOptions {
     public var enlargeCanvas = true
     public var shiftMode: ShiftMode = .subpixel
     public var lowMemory = false
+    /// nil = xy alignment only.
+    public var zCorrection: ZCorrectionOptions?
     public init(yaml: URL) { self.yaml = yaml }
 }
 
@@ -29,6 +33,9 @@ public struct AlignResult {
     public var movies: [URL] = []
     /// shifts[p][t] = (dy, dx)
     public var shifts: [[(dy: Double, dx: Double)]] = []
+    /// Z correction, per embryo: what was measured at every timepoint and the whole-slice shifts applied.
+    public var zSteps: [[ZStep]] = []
+    public var zPlans: [ZPlan] = []
 }
 
 public final class AlignPipeline {
@@ -98,17 +105,21 @@ public final class AlignPipeline {
                      isND2: false, stem: PyFormat.stemWithoutOME(tif))
     }
 
+    /// "_z" in output names when z correction is on, so both versions can sit side by side.
+    var zSuffix: String { options.zCorrection == nil ? "" : "_z" }
+
     func tiffURL(_ input: Input, p: Int) -> URL {
-        input.isND2 ? input.outDir.appendingPathComponent("\(input.base)_P\(p).ome.tif")
-                    : input.outDir.appendingPathComponent("\(input.stem)_xy.ome.tif")
+        input.isND2 ? input.outDir.appendingPathComponent("\(input.base)_P\(p)\(zSuffix).ome.tif")
+                    : input.outDir.appendingPathComponent("\(input.stem)_xy\(zSuffix).ome.tif")
     }
 
     func movieURLs(_ input: Input, p: Int, aligned: Bool) -> [URL] {
         input.source.metadata.channelNames.prefix(input.source.c).map { ch in
             if input.isND2 {
-                return input.outDir.appendingPathComponent("\(input.base)_P\(p)_\(ch)_\(aligned ? "aligned" : "unaligned").mp4")
+                return input.outDir.appendingPathComponent(aligned ? "\(input.base)_P\(p)\(zSuffix)_\(ch)_aligned.mp4"
+                                                                    : "\(input.base)_P\(p)_\(ch)_unaligned.mp4")
             }
-            return input.outDir.appendingPathComponent(aligned ? "\(input.stem)_xy_\(ch)_aligned.mp4"
+            return input.outDir.appendingPathComponent(aligned ? "\(input.stem)_xy\(zSuffix)_\(ch)_aligned.mp4"
                                                                 : "\(input.stem)_\(ch)_unaligned.mp4")
         }
     }
@@ -130,7 +141,8 @@ public final class AlignPipeline {
         ctx.log("  Output: \(input.outDir.path)")
 
         var result = AlignResult(outputDirectory: input.outDir)
-        if options.enlargeCanvas {
+        // Z correction needs every shift before anything is written, so it always takes the two-pass path.
+        if options.enlargeCanvas || options.zCorrection != nil {
             try twoPass(cfg, input, &result)
         } else {
             try singlePass(cfg, input, &result)
@@ -145,26 +157,54 @@ public final class AlignPipeline {
         let T = src.t, P = src.positions
         let width = pipelineWidth(frameBytes: src.frameBytes)
         let cache = FrameCache(enabled: !options.lowMemory && FrameCache.fits(bytes: src.frameBytes * T * P))
+        let zopt = options.zCorrection
+        let zChannel = try zopt?.resolveChannel(names: src.metadata.channelNames, count: src.c,
+                                                fallback: cfg.parameters.channelIndex) ?? 0
+        var trackers: [ZTracker] = []
+        let pixelSize = src.metadata.physicalSizeX
+        if zopt != nil {
+            let names = src.metadata.channelNames
+            ctx.log("  Z correction: channel \(zChannel < names.count ? names[zChannel] : "ch\(zChannel)") (index \(zChannel)), "
+                    + (src.metadata(position: 0).stageZ == nil ? "no stage positions in the file" : "starting from the stage positions"))
+        }
 
         ctx.log("\n--- Pass 1: precomputing shifts ---")
         var shifts = [[(dy: Double, dx: Double)]](repeating: [], count: P)
         for p in 0..<P {
             ctx.log("\n  Embryo \(p)/\(P - 1):")
+            let tracker = zopt.map { ZTracker(options: $0, metadata: src.metadata(position: p)) }
+            var zBox: ZBox?
+            if let z = zopt, case .box(let bx, let by, let bw, let bh) = z.region, T > 0 {
+                // The box was drawn on the reference timepoint before alignment: move it with that timepoint's xy shift.
+                let rt = min(max(0, z.referenceTimepoint), T - 1)
+                let r = try Detection.computeShift(frame: try src.readFrame(t: rt, p: p), params: try cfg.params(forTimepoint: rt),
+                                                   backend: backend)
+                zBox = ZBox(x: bx + Shift.pyRound(r.dx), y: by + Shift.pyRound(r.dy), width: bw, height: bh)
+            }
             let unaligned = try movies.map {
                 try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: false),
                                   width: src.x, height: src.y, fps: options.fps)
             }
             do {
-                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> (Detection.Result, [[UInt8]]) in
+                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> (Detection.Result, [[UInt8]], ZDescriptor?) in
                     let frame = try src.readFrame(t: t, p: p)
                     let params = try cfg.params(forTimepoint: t)
                     let r = try Detection.computeShift(frame: frame, params: params, backend: self.backend)
                     var gray: [[UInt8]] = []
                     if unaligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(frame)) }
+                    // What z correction needs of this timepoint, measured on the xy-centred frame.
+                    var descriptor: ZDescriptor?
+                    if let z = zopt {
+                        descriptor = ZDrift.describe(frame: frame, channel: zChannel, shift: (Shift.pyRound(r.dy), Shift.pyRound(r.dx)),
+                                                     mask: z.region == .embryoMask ? r.mask : nil, box: zBox,
+                                                     pixelSizeUm: pixelSize, detectNuclei: z.useNuclei)
+                    }
                     cache.put(p * T + t, frame)
-                    return (r, gray)
+                    return (r, gray, descriptor)
                 }, consume: { t, value in
-                    ctx.log(Masking.shiftLine(value.0.dy, value.0.dx))
+                    var line = Masking.shiftLine(value.0.dy, value.0.dx)
+                    if let d = value.2, let tr = tracker { line += "   " + ZDrift.line(tr.add(d)) }
+                    ctx.log(line)
                     shifts[p].append((value.0.dy, value.0.dx))
                     try unaligned?.append(value.1)
                     ctx.progress("Pass 1: shifts (embryo \(p))", t + 1, T)
@@ -175,6 +215,7 @@ public final class AlignPipeline {
                 throw error
             }
             if let u = unaligned { result.movies += u.urls }
+            if let tr = tracker { trackers.append(tr) }
         }
         result.shifts = shifts
 
@@ -183,18 +224,30 @@ public final class AlignPipeline {
         ctx.log("\nShift summary (pixels):")
         ctx.log(PyFormat.fmt("  dy  min=%+.1f  max=%+.1f  mean=%+.1f", dys.min() ?? 0, dys.max() ?? 0, mean(dys)))
         ctx.log(PyFormat.fmt("  dx  min=%+.1f  max=%+.1f  mean=%+.1f", dxs.min() ?? 0, dxs.max() ?? 0, mean(dxs)))
-        let pad = Padding.covering(dys: dys, dxs: dxs)
+        let pad = options.enlargeCanvas ? Padding.covering(dys: dys, dxs: dxs) : Padding.none
         ctx.log("\nCanvas padding:  top=\(pad.top)  bottom=\(pad.bottom)  left=\(pad.left)  right=\(pad.right)")
         let Y = src.y + pad.top + pad.bottom, X = src.x + pad.left + pad.right
         ctx.log("  Expanded canvas: Y=\(Y)  X=\(X)")
+
+        // Whole-slice z shifts per embryo. Without canvas enlargement, slices that leave the stack are dropped.
+        let plans = trackers.map { $0.plan(pad: options.enlargeCanvas) }
+        for (p, plan) in plans.enumerated() {
+            ctx.log("\nZ correction, embryo \(p):")
+            for line in ZReport.summary(steps: trackers[p].steps, plan: plan, z: src.z) { ctx.log(line) }
+        }
+        result.zSteps = trackers.map { $0.steps }
+        result.zPlans = plans
 
         ctx.log("\n--- Pass 2: aligning \(P) embryo(s) × \(T) timepoints ---")
         for p in 0..<P {
             ctx.log("\n  Embryo \(p)/\(P - 1)")
             let url = tiffURL(input, p: p)
             ctx.log("    Saving \(url.lastPathComponent)\(options.lowMemory ? " (streaming)" : "") ...")
-            let writer = try OMETIFFWriter(url: url, t: T, c: src.c, z: src.z, y: Y, x: X, type: .uint16,
-                                           metadata: src.metadata, bigTIFF: options.lowMemory ? true : nil)
+            let plan = plans.isEmpty ? nil : plans[p]
+            var meta = src.metadata(position: p)
+            if let pl = plan { meta = ZReport.correctedStage(meta, plan: pl) }
+            let writer = try OMETIFFWriter(url: url, t: T, c: src.c, z: src.z + (plan?.padLow ?? 0) + (plan?.padHigh ?? 0),
+                                           y: Y, x: X, type: .uint16, metadata: meta, bigTIFF: options.lowMemory ? true : nil)
             let aligned = try movies.map {
                 try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: true),
                                   width: X, height: Y, fps: options.fps)
@@ -203,9 +256,11 @@ public final class AlignPipeline {
                 try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> (Volume, [[UInt8]]) in
                     let frame = try cache.take(p * T + t) ?? src.readFrame(t: t, p: p)
                     let s = shifts[p][t]
-                    let out = try self.backend.shift(frame, pad: pad, dy: s.dy, dx: s.dx, mode: self.options.shiftMode)
+                    var out = try self.backend.shift(frame, pad: pad, dy: s.dy, dx: s.dx, mode: self.options.shiftMode)
                     var gray: [[UInt8]] = []
                     if aligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(out)) }
+                    // Move whole slices; the gaps stay empty. (The movies are max projections, which this does not change.)
+                    if let pl = plan { out = ZDrift.place(out, shift: pl.shift[t], padLow: pl.padLow, padHigh: pl.padHigh) }
                     return (out, gray)
                 }, consume: { t, value in
                     try writer.writeVolume(value.0)
@@ -220,6 +275,13 @@ public final class AlignPipeline {
             }
             ctx.log("    Saved \(url.lastPathComponent)")
             result.tiffs.append(url)
+            if let pl = plan {
+                let csv = url.deletingLastPathComponent()
+                    .appendingPathComponent(url.lastPathComponent.replacingOccurrences(of: ".ome.tif", with: "_shifts.csv"))
+                try ZReport.csv(steps: trackers[p].steps, plan: pl, stageZ: src.metadata(position: p).stageZ)
+                    .write(to: csv, atomically: true, encoding: .utf8)
+                ctx.log("    Saved \(csv.lastPathComponent)")
+            }
             if let a = aligned {
                 result.movies += a.urls
                 for u in a.urls { ctx.log("    Saved \(u.lastPathComponent)") }
@@ -245,7 +307,7 @@ public final class AlignPipeline {
             let url = tiffURL(input, p: p)
             ctx.log("    Saving \(url.lastPathComponent)\(options.lowMemory ? " (streaming)" : "") ...")
             let writer = try OMETIFFWriter(url: url, t: T, c: src.c, z: src.z, y: src.y, x: src.x, type: .uint16,
-                                           metadata: src.metadata, bigTIFF: options.lowMemory ? true : nil)
+                                           metadata: src.metadata(position: p), bigTIFF: options.lowMemory ? true : nil)
             let aligned = try movies.map {
                 try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: true),
                                   width: src.x, height: src.y, fps: options.fps)

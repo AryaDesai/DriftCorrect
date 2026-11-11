@@ -55,6 +55,8 @@ public enum Detection {
         public var dy: Double
         public var dx: Double
         public var centroid: (y: Double, x: Double)
+        /// The mask the centroid came from (z correction can restrict itself to it).
+        public var mask: Mask2D?
     }
 
     /// `compute_shift_xy(frame, sigma, percentile, ch_idx, method, block_size, invert, levels, selected_levels)`.
@@ -68,7 +70,7 @@ public enum Detection {
                                             blockSize: params.blockSize, invert: params.invert,
                                             levels: params.levels, selectedLevels: params.selectedLevels)
         let (dy, dx) = Masking.shift(toCenter: r.centroid, height: frame.y, width: frame.x)
-        return Result(dy: dy, dx: dx, centroid: r.centroid)
+        return Result(dy: dy, dx: dx, centroid: r.centroid, mask: r.mask)
     }
 }
 

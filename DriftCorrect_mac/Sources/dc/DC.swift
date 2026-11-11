@@ -14,7 +14,7 @@ struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dc",
         abstract: "Embryo drift-correction tools (Apple silicon).",
-        subcommands: [Convert.self, Align.self, ND2Info.self, Bench.self])
+        subcommands: [Convert.self, Align.self, ZShifts.self, ND2Info.self, Bench.self])
 }
 
 struct BackendOption: ParsableArguments {
@@ -45,6 +45,54 @@ func parseBool(_ s: String) throws -> Bool {
     case "true", "1", "yes": return true
     case "false", "0", "no": return false
     default: throw ValidationError("Expected true or false")
+    }
+}
+
+/// Z-correction settings shared by `align --z-correct` and `z-shifts`.
+struct ZOptionGroup: ParsableArguments {
+    @Option(name: [.customLong("z-channel"), .customLong("z_channel")],
+            help: "Channel to follow in z: a name or a 0-based index. A nuclear marker works best. (Default: the threshold channel for align, channel 0 for z-shifts.)")
+    var zChannel: String?
+
+    @Option(name: [.customLong("z-region"), .customLong("z_region")],
+            help: "What to follow in z: mask (the embryo mask), whole (the whole frame) or box (see --z-box).")
+    var zRegion: String?
+
+    @Option(name: [.customLong("z-box"), .customLong("z_box")],
+            help: "x,y,width,height in pixels of the first timepoint: a box over cells that should stay still.")
+    var zBox: String?
+
+    @Flag(name: [.customLong("z-no-stage"), .customLong("z_no_stage")], help: "Ignore the stage z positions recorded in the file.")
+    var zNoStage = false
+
+    @Flag(name: [.customLong("z-no-nuclei"), .customLong("z_no_nuclei")], help: "Use the image comparison only; do not match individual nuclei.")
+    var zNoNuclei = false
+
+    func make(defaultRegion: ZRegion) throws -> ZCorrectionOptions {
+        var o = ZCorrectionOptions()
+        if let c = zChannel {
+            if let i = Int(c) { o.channelIndex = i } else { o.channelName = c }
+        }
+        var box: ZRegion?
+        if let b = zBox {
+            let v = b.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+            guard v.count == 4, v.allSatisfy({ $0 != nil }), v[2]! > 0, v[3]! > 0 else {
+                throw ValidationError("--z-box needs x,y,width,height in pixels")
+            }
+            box = .box(x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]!)
+        }
+        switch zRegion?.lowercased() {
+        case nil: o.region = box ?? defaultRegion
+        case "mask": o.region = .embryoMask
+        case "whole": o.region = .wholeFrame
+        case "box":
+            guard let b = box else { throw ValidationError("--z-region box needs --z-box x,y,width,height") }
+            o.region = b
+        default: throw ValidationError("--z-region must be mask, whole or box")
+        }
+        o.useStagePositions = !zNoStage
+        o.useNuclei = !zNoNuclei
+        return o
     }
 }
 
@@ -103,10 +151,17 @@ struct Align: ParsableCommand {
     @Flag(help: "Do not write MP4 movies.")
     var noMovies = false
 
+    @Flag(name: [.customLong("z-correct"), .customLong("z_correct")],
+          help: "Also correct z drift, after xy: whole slices move and empty slices fill the gaps.")
+    var zCorrect = false
+
+    @OptionGroup var z: ZOptionGroup
+
     @OptionGroup var backend: BackendOption
 
     func run() throws {
         var o = AlignOptions(yaml: URL(fileURLWithPath: yamlFile))
+        if zCorrect { o.zCorrection = try z.make(defaultRegion: .embryoMask) }
         o.useND2 = useND2
         o.fps = fps
         o.enlargeCanvas = !noEnlargeCanvas
@@ -120,6 +175,33 @@ struct Align: ParsableCommand {
         let start = Date()
         _ = try AlignPipeline(options: o, backend: backend.make(), movies: noMovies ? nil : (HEVCMovieFactory() as MovieWriterFactory),
                               context: consoleContext()).run()
+        print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
+    }
+}
+
+struct ZShifts: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "z-shifts",
+        abstract: "Measure z drift of a TIFF or ND2 and save it as CSV, without writing a corrected stack. No xy alignment is applied.")
+
+    @Argument(help: "An OME-TIFF or ND2 file.")
+    var file: String
+
+    @Option(help: "Embryo position (ND2 only).")
+    var position = 0
+
+    @Option(help: "Where to save the table (default: next to the file, {name}_z_shifts.csv).")
+    var csv: String?
+
+    @OptionGroup var z: ZOptionGroup
+
+    func run() throws {
+        let url = URL(fileURLWithPath: file)
+        let source: FrameSource = url.pathExtension.lowercased() == "nd2" ? try ND2Source(url: url) : try TIFFSource(url: url)
+        let options = try z.make(defaultRegion: .wholeFrame)
+        let out = csv.map { URL(fileURLWithPath: $0) }
+            ?? url.deletingLastPathComponent().appendingPathComponent("\(PyFormat.stemWithoutOME(url))_z_shifts.csv")
+        let start = Date()
+        _ = try ZMeasure.run(source: source, position: position, options: options, csv: out, context: consoleContext())
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
     }
 }
