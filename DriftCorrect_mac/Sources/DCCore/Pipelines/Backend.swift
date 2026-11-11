@@ -55,7 +55,7 @@ public enum Detection {
         public var dy: Double
         public var dx: Double
         public var centroid: (y: Double, x: Double)
-        /// The mask the centroid came from (z correction can restrict itself to it).
+        /// The mask that the centroid came from. Z correction can follow this mask.
         public var mask: Mask2D?
     }
 

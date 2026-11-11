@@ -61,14 +61,14 @@ struct AlignView: View {
                         Picker("Z channel:", selection: $zChannel) {
                             ForEach(zChannels.indices, id: \.self) { Text(zChannels[$0]).tag($0) }
                         }
-                        .help("The channel whose pattern is followed in z. A nuclear marker works best.")
+                        .help("The channel whose pattern is followed in z. A nuclear marker is the best choice.")
                     }
                     Picker("Follow:", selection: $zFollow) {
                         Text("Embryo mask").tag(ZFollow.mask)
                         Text("A box I draw").tag(ZFollow.box)
                         Text("Whole frame").tag(ZFollow.whole)
                     }
-                    .help("Which part of the image must stay in the same slice. Draw a box over cells that should not move in z to follow only those.")
+                    .help("The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
                     if zFollow == .box {
                         LabeledContent("Box:") {
                             HStack {
@@ -106,7 +106,7 @@ struct AlignView: View {
         return "x \(Int(b.minX)), y \(Int(b.minY)), \(Int(b.width)) × \(Int(b.height)) px"
     }
 
-    /// Find the image file the YAML points to and list its channels.
+    /// Find the image file that the YAML file points to and list its channels.
     private func loadChannels() {
         guard zCorrect else { return }
         let yaml = expand(yamlPath)
@@ -124,7 +124,7 @@ struct AlignView: View {
                     file = u
                 }
             }
-            // Start on a nuclear marker when a channel name looks like one; otherwise the threshold channel.
+            // Start on a channel whose name looks like a nuclear marker. Without one, start on the threshold channel.
             let nuclear = names.firstIndex { n in ["mcherry", "h2b", "nuc", "dapi", "hoechst"].contains { n.lowercased().contains($0) } }
             let choice = nuclear ?? min(threshold, max(0, names.count - 1))
             let foundNames = names, foundFile = file

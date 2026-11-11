@@ -57,7 +57,8 @@ public enum TIFFConcat {
             if !names.isEmpty { meta.channelNames = names }
         }
 
-        // Stage z positions join along T like the frames. They are kept only when every file has them.
+        // Join the stage z positions along T in the same order as the frames. They are kept only when every file
+        // has them.
         let stages = stacks.map { $0.metadata.stageZ }
         if stages.allSatisfy({ $0 != nil }) {
             meta.stageZ = stages.flatMap { $0! }

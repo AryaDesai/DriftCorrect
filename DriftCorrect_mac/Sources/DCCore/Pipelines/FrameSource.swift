@@ -10,7 +10,7 @@ public protocol FrameSource: AnyObject {
     var x: Int { get }
     var sampleType: SampleType { get }
     var metadata: ImageMetadata { get }
-    /// Metadata of one position, with its stage z positions when the file records them.
+    /// Return the metadata of one position, with its stage z positions when the file records them.
     func metadata(position p: Int) -> ImageMetadata
     func readFrame(t: Int, p: Int) throws -> Volume
 }

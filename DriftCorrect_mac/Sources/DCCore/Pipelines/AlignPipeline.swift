@@ -13,8 +13,8 @@ import Foundation
 ///   TIFFs again afterwards. The frames and the contrast rule are the same.
 /// - The unaligned movie name is `{stem}_{channel}_unaligned.mp4` for both
 ///   canvas modes (the two-pass Python path produced a different name).
-/// - Optional z correction after xy (`zCorrection`): see `ZDrift`. The output is then
-///   `{stem}_xy_z.ome.tif` plus `{stem}_xy_z_shifts.csv`.
+/// - With `zCorrection` set, z correction runs after the xy alignment, as `ZDrift` describes. The output is then
+///   `{stem}_xy_z.ome.tif` and `{stem}_xy_z_shifts.csv`.
 public struct AlignOptions {
     public var yaml: URL
     public var useND2 = false
@@ -22,7 +22,7 @@ public struct AlignOptions {
     public var enlargeCanvas = true
     public var shiftMode: ShiftMode = .subpixel
     public var lowMemory = false
-    /// nil = xy alignment only.
+    /// Settings of the z correction. When nil, only the xy alignment runs.
     public var zCorrection: ZCorrectionOptions?
     public init(yaml: URL) { self.yaml = yaml }
 }
@@ -33,7 +33,8 @@ public struct AlignResult {
     public var movies: [URL] = []
     /// shifts[p][t] = (dy, dx)
     public var shifts: [[(dy: Double, dx: Double)]] = []
-    /// Z correction, per embryo: what was measured at every timepoint and the whole-slice shifts applied.
+    /// The z correction of each embryo. `zSteps` holds what was measured at every timepoint and `zPlans` holds
+    /// the shifts in whole slices.
     public var zSteps: [[ZStep]] = []
     public var zPlans: [ZPlan] = []
 }
@@ -105,7 +106,8 @@ public final class AlignPipeline {
                      isND2: false, stem: PyFormat.stemWithoutOME(tif))
     }
 
-    /// "_z" in output names when z correction is on, so both versions can sit side by side.
+    /// The suffix that output names get when z correction is on. It keeps the output apart from the output of a
+    /// run without z correction.
     var zSuffix: String { options.zCorrection == nil ? "" : "_z" }
 
     func tiffURL(_ input: Input, p: Int) -> URL {
@@ -141,7 +143,8 @@ public final class AlignPipeline {
         ctx.log("  Output: \(input.outDir.path)")
 
         var result = AlignResult(outputDirectory: input.outDir)
-        // Z correction needs every shift before anything is written, so it always takes the two-pass path.
+        // Z correction needs the shift of every timepoint before anything is written, so it always takes the
+        // path with two passes.
         if options.enlargeCanvas || options.zCorrection != nil {
             try twoPass(cfg, input, &result)
         } else {
@@ -175,7 +178,8 @@ public final class AlignPipeline {
             let tracker = zopt.map { ZTracker(options: $0, metadata: src.metadata(position: p)) }
             var zBox: ZBox?
             if let z = zopt, case .box(let bx, let by, let bw, let bh) = z.region, T > 0 {
-                // The box was drawn on the reference timepoint before alignment: move it with that timepoint's xy shift.
+                // The box was drawn on the reference timepoint before the alignment. Move it by the xy shift of
+                // that timepoint.
                 let rt = min(max(0, z.referenceTimepoint), T - 1)
                 let r = try Detection.computeShift(frame: try src.readFrame(t: rt, p: p), params: try cfg.params(forTimepoint: rt),
                                                    backend: backend)
@@ -192,7 +196,7 @@ public final class AlignPipeline {
                     let r = try Detection.computeShift(frame: frame, params: params, backend: self.backend)
                     var gray: [[UInt8]] = []
                     if unaligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(frame)) }
-                    // What z correction needs of this timepoint, measured on the xy-centred frame.
+                    // Reduce this timepoint to the data that z correction needs, measured on the frame centred in xy.
                     var descriptor: ZDescriptor?
                     if let z = zopt {
                         descriptor = ZDrift.describe(frame: frame, channel: zChannel, shift: (Shift.pyRound(r.dy), Shift.pyRound(r.dx)),
@@ -229,7 +233,8 @@ public final class AlignPipeline {
         let Y = src.y + pad.top + pad.bottom, X = src.x + pad.left + pad.right
         ctx.log("  Expanded canvas: Y=\(Y)  X=\(X)")
 
-        // Whole-slice z shifts per embryo. Without canvas enlargement, slices that leave the stack are dropped.
+        // Work out the z shift of every timepoint in whole slices, for each embryo. When the canvas is not
+        // enlarged, slices that leave the stack are dropped.
         let plans = trackers.map { $0.plan(pad: options.enlargeCanvas) }
         for (p, plan) in plans.enumerated() {
             ctx.log("\nZ correction, embryo \(p):")
@@ -259,7 +264,8 @@ public final class AlignPipeline {
                     var out = try self.backend.shift(frame, pad: pad, dy: s.dy, dx: s.dx, mode: self.options.shiftMode)
                     var gray: [[UInt8]] = []
                     if aligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(out)) }
-                    // Move whole slices; the gaps stay empty. (The movies are max projections, which this does not change.)
+                    // Move whole slices and leave the gaps empty. The movie frames are made before this step
+                    // because a maximum projection along z does not change.
                     if let pl = plan { out = ZDrift.place(out, shift: pl.shift[t], padLow: pl.padLow, padHigh: pl.padHigh) }
                     return (out, gray)
                 }, consume: { t, value in

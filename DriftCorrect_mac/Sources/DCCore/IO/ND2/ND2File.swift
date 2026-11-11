@@ -67,7 +67,8 @@ public final class ND2File: @unchecked Sendable {
     public private(set) var loopAxes: [Character] = []
     private var loopCounts: [Int] = []
     private var frameChunkOffsets: [Int: UInt64] = [:]
-    /// Stage z (µm) of every stored frame by sequence index (the `CustomData|Z!` chunk); nil when absent.
+    /// The stage z position of every stored frame in micrometres, by sequence index. It comes from the
+    /// `CustomData|Z!` chunk and is nil when the file has none.
     public private(set) var stageZBySequence: [Double]?
 
     public init(url: URL) throws {
@@ -181,15 +182,16 @@ public final class ND2File: @unchecked Sendable {
             if let i = Int(digits) { frameChunkOffsets[i] = offset }
         }
 
-        // Stage z per frame: little-endian float64, one per sequence index.
+        // Read the stage z position of every frame. The chunk holds one little endian 64 bit float for each
+        // sequence index.
         if let offset = chunkMap["CustomData|Z!"], let data = try? readChunk(at: offset), data.count >= 8 {
             let r = ByteReader(data)
             stageZBySequence = (0..<data.count / 8).map { r.f64(at: $0 * 8) }
         }
     }
 
-    /// Stage z of the first slice of every timepoint of position `p`, and the signed z step between slices.
-    /// nil when the file has no usable stage positions.
+    /// Return the stage z position of the first slice of every timepoint of position `p`, and the z step from one
+    /// slice to the next. The result is nil when the file has no usable stage positions.
     public func stagePositions(p: Int) -> (z: [Double], step: Double?)? {
         guard let all = stageZBySequence else { return nil }
         var z0: [Double] = []
@@ -206,7 +208,7 @@ public final class ND2File: @unchecked Sendable {
         return (z0, step)
     }
 
-    /// Metadata of position `p`, including its stage z positions.
+    /// Return the metadata of position `p`, including its stage z positions.
     public func metadata(position p: Int) -> ImageMetadata {
         var m = metadata
         if let s = stagePositions(p: p) {

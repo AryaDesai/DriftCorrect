@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import DCCore
 
-/// Z correction on a synthetic embryo: a fixed 3-D scene of nucleus-like blobs, seen through a stack that
-/// starts at a different depth at each timepoint.
+/// Tests of z correction on a synthetic embryo. The embryo is a fixed scene of blobs that look like nuclei, and the
+/// stack of each timepoint starts at a different depth of that scene.
 final class ZCorrectionTests: XCTestCase {
     var tmp: URL!
 
@@ -18,7 +18,14 @@ final class ZCorrectionTests: XCTestCase {
 
     static let size = 160, depth = 44, slices = 14, base = 14
 
-    /// Scene planes (depth, size, size) as uint16: a bright disc with blobs in it, on a dim background.
+    /// Settings that follow the whole frame. The default region is the embryo mask, which needs a threshold YAML file.
+    var wholeFrame: ZCorrectionOptions {
+        var o = ZCorrectionOptions()
+        o.region = .wholeFrame
+        return o
+    }
+
+    /// The planes of the scene as uint16. The scene is a bright disc with blobs in it on a dim background.
     static let scene: [[UInt16]] = {
         var state: UInt64 = 0x9E3779B97F4A7C15
         func rnd() -> Double {
@@ -59,7 +66,7 @@ final class ZCorrectionTests: XCTestCase {
         return v
     }
 
-    /// Write a movie with the given stack offsets; optionally record them as stage positions (2 um per slice).
+    /// Write a movie with the given stack offsets. With `stage`, the offsets are also recorded as stage positions.
     func writeMovie(_ name: String, offsets: [Int], stage: Bool) throws -> URL {
         let url = tmp.appendingPathComponent(name)
         var meta = ImageMetadata(channelNames: ["nuc"], physicalSizeX: 0.43, physicalSizeY: 0.43, physicalSizeZ: 2, timeIncrement: 240)
@@ -91,7 +98,7 @@ final class ZCorrectionTests: XCTestCase {
     }
 
     func testPlanDeadBandAndPadding() {
-        // Positions 0, 0.55, 0.75, 2.75, -0.65: the shift waits until the position is 0.65 away from it.
+        // The positions are 0, 0.55, 0.75, 2.75 and -0.65. The shift changes only when the position is 0.65 away from it.
         let plan = ZDrift.plan(steps: [0, 0.55, 0.2, 2.0, -3.4], reference: 0, deadBand: 0.15, pad: true)
         XCTAssertEqual(plan.shift, [0, 0, -1, -3, 1])
         XCTAssertEqual(plan.padLow, 3)
@@ -106,14 +113,15 @@ final class ZCorrectionTests: XCTestCase {
         let v = frame(offset: 0)
         let out = ZDrift.place(v, shift: -2, padLow: 3, padHigh: 1)
         XCTAssertEqual(out.z, Self.slices + 4)
-        XCTAssertEqual(out.floatPlane(1), v.floatPlane(0))                 // input slice 0 -> output slice 0 - 2 + 3
-        XCTAssertEqual(out.floatPlane(0).max(), 0)                         // nothing lands here: empty
+        // Input slice 0 lands on output slice 1, and no input slice lands on output slice 0 or on the last output slice.
+        XCTAssertEqual(out.floatPlane(1), v.floatPlane(0))
+        XCTAssertEqual(out.floatPlane(0).max(), 0)
         XCTAssertEqual(out.floatPlane(Self.slices + 3).max(), 0)
         XCTAssertEqual(out.floatPlane(Self.slices), v.floatPlane(Self.slices - 1))
     }
 
     func testMeasuresKnownShifts() throws {
-        // The stack start moves by these many slices; the tissue then appears to move the other way.
+        // The start of the stack moves by this many slices, so the tissue appears to move the other way.
         let offsets = [0, 0, 3, 3, -2, -1]
         let expected: [Double] = [0, 0, -3, 0, 5, -1]
         for stage in [false, true] {
@@ -133,7 +141,7 @@ final class ZCorrectionTests: XCTestCase {
                 XCTAssertGreaterThan(r.steps[1].agreeing, 10, "nuclei should be matched (\(region))")
             }
             // After placing, every timepoint shows the same scene plane in a given output slice.
-            let r = try ZMeasure.run(source: src, options: ZCorrectionOptions(), csv: nil, context: .silent())
+            let r = try ZMeasure.run(source: src, options: wholeFrame, csv: nil, context: .silent())
             let k = r.plan.padLow + 6
             let reference = ZDrift.place(try src.readFrame(t: 0, p: 0), shift: r.plan.shift[0], padLow: r.plan.padLow, padHigh: r.plan.padHigh)
             for t in 1..<offsets.count {
@@ -144,16 +152,44 @@ final class ZCorrectionTests: XCTestCase {
     }
 
     func testStageCoversJumpWithoutOverlap() throws {
-        // An 11-slice jump leaves 3 of 14 slices in common: too few to compare, so the stage value is used as is.
+        // A jump of 11 slices leaves 3 of the 14 slices in common. That is too few to compare, so the stage value is
+        // used as it is.
         let offsets = [0, 11, 11]
         let withStage = try ZMeasure.run(source: TIFFSource(url: try writeMovie("jump.ome.tif", offsets: offsets, stage: true)),
-                                         options: ZCorrectionOptions(), csv: tmp.appendingPathComponent("jump.csv"), context: .silent())
+                                         options: wholeFrame, csv: tmp.appendingPathComponent("jump.csv"), context: .silent())
         XCTAssertEqual(withStage.steps[1].dz, -11, accuracy: 1e-9)
         XCTAssertTrue(withStage.steps[1].flag.hasPrefix("stage only"))
         XCTAssertEqual(withStage.steps[2].dz, 0, accuracy: 0.3)
         XCTAssertEqual(withStage.plan.shift, [0, 11, 11])
         let csv = try String(contentsOf: tmp.appendingPathComponent("jump.csv"), encoding: .utf8)
         XCTAssertEqual(csv.split(separator: "\n").count, 4)
+    }
+
+    func testCorrectZWithoutXYAlignment() throws {
+        let offsets = [0, 3, 3, -2]
+        let tif = try writeMovie("P0_concat_xy.ome.tif", offsets: offsets, stage: false)
+        var o = ZCorrectOptions(input: tif)
+        o.z = wholeFrame
+        let r = try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent())
+        XCTAssertEqual(r.tiff.lastPathComponent, "P0_concat_xy_z.ome.tif")
+        XCTAssertEqual(r.plan.shift, [0, 3, 3, -2])
+        let out = try TIFFStack(url: r.tiff)
+        XCTAssertEqual(out.z, Self.slices + 5)
+        XCTAssertEqual(out.y, Self.size)
+        // Output slice k holds the same scene plane at every timepoint, with the original pixel values.
+        let k = r.plan.padLow + 6
+        let first = try out.readFrame(0).floatPlane(k)
+        XCTAssertEqual(first, frame(offset: 0).floatPlane(6))
+        for t in 1..<offsets.count { XCTAssertEqual(try out.readFrame(t).floatPlane(k), first, "t\(t)") }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: r.csv.path))
+
+        // The embryo mask cannot be followed without a threshold YAML file.
+        o.z = ZCorrectionOptions()
+        XCTAssertThrowsError(try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent()))
+        // Without extra slices the stack keeps its depth.
+        o.z = wholeFrame
+        o.enlargeStack = false
+        XCTAssertEqual(try TIFFStack(url: try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent()).tiff).z, Self.slices)
     }
 
     func testAlignWithZCorrection() throws {
@@ -180,7 +216,7 @@ final class ZCorrectionTests: XCTestCase {
         let stage = try XCTUnwrap(out.metadata.stageZ)
         for z in stage { XCTAssertEqual(z, stage[0], accuracy: 1e-6) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("aligned_P0_concat/P0_concat_xy_z_shifts.csv").path))
-        // Timepoint 2 moved up 3 slices and 2 empty slices were added below: its slices 0-4 are empty.
+        // Timepoint 2 moved up by 3 slices and 2 empty slices were added below, so its slices 0 to 4 are empty.
         let t2 = try out.readFrame(2)
         XCTAssertEqual(t2.floatPlane(4).max(), 0)
         XCTAssertGreaterThan(t2.floatPlane(5).max() ?? 0, 0)

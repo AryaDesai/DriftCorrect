@@ -14,7 +14,7 @@ struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dc",
         abstract: "Embryo drift-correction tools (Apple silicon).",
-        subcommands: [Convert.self, Align.self, ZShifts.self, ND2Info.self, Bench.self])
+        subcommands: [Convert.self, Align.self, CorrectZ.self, ZShifts.self, ND2Info.self, Bench.self])
 }
 
 struct BackendOption: ParsableArguments {
@@ -48,24 +48,24 @@ func parseBool(_ s: String) throws -> Bool {
     }
 }
 
-/// Z-correction settings shared by `align --z-correct` and `z-shifts`.
+/// The z correction settings that `align --z-correct`, `correct-z` and `z-shifts` share.
 struct ZOptionGroup: ParsableArguments {
     @Option(name: [.customLong("z-channel"), .customLong("z_channel")],
-            help: "Channel to follow in z: a name or a 0-based index. A nuclear marker works best. (Default: the threshold channel for align, channel 0 for z-shifts.)")
+            help: "The channel to follow in z, given as a name or as an index that starts at 0. A nuclear marker is the best choice. The default is the threshold channel of the YAML file, or channel 0 when there is no YAML file.")
     var zChannel: String?
 
     @Option(name: [.customLong("z-region"), .customLong("z_region")],
-            help: "What to follow in z: mask (the embryo mask), whole (the whole frame) or box (see --z-box).")
+            help: "The part of the image to follow in z. It is mask for the embryo mask, whole for the whole frame, or box for the box that --z-box gives.")
     var zRegion: String?
 
     @Option(name: [.customLong("z-box"), .customLong("z_box")],
-            help: "x,y,width,height in pixels of the first timepoint: a box over cells that should stay still.")
+            help: "A box over cells that should stay in the same slice, as x,y,width,height in pixels of the first timepoint.")
     var zBox: String?
 
     @Flag(name: [.customLong("z-no-stage"), .customLong("z_no_stage")], help: "Ignore the stage z positions recorded in the file.")
     var zNoStage = false
 
-    @Flag(name: [.customLong("z-no-nuclei"), .customLong("z_no_nuclei")], help: "Use the image comparison only; do not match individual nuclei.")
+    @Flag(name: [.customLong("z-no-nuclei"), .customLong("z_no_nuclei")], help: "Use the image comparison alone and skip the matching of individual nuclei.")
     var zNoNuclei = false
 
     func make(defaultRegion: ZRegion) throws -> ZCorrectionOptions {
@@ -152,7 +152,7 @@ struct Align: ParsableCommand {
     var noMovies = false
 
     @Flag(name: [.customLong("z-correct"), .customLong("z_correct")],
-          help: "Also correct z drift, after xy: whole slices move and empty slices fill the gaps.")
+          help: "Also correct z drift after the xy alignment. Whole slices move and empty slices fill the gaps.")
     var zCorrect = false
 
     @OptionGroup var z: ZOptionGroup
@@ -179,12 +179,51 @@ struct Align: ParsableCommand {
     }
 }
 
+struct CorrectZ: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "correct-z",
+        abstract: "Correct z drift of an OME-TIFF or ND2 file without the xy alignment. Writes {name}_z.ome.tif next to the file.")
+
+    @Argument(help: "An OME-TIFF or ND2 file, for example the _xy.ome.tif that align wrote.")
+    var file: String
+
+    @Option(help: "Threshold YAML from the Mask tool. It is needed only with --z-region mask.")
+    var yaml: String?
+
+    @Option(help: "Embryo position (ND2 only).")
+    var position = 0
+
+    @Flag(name: [.customLong("no-enlarge-stack"), .customLong("no_enlarge_stack")],
+          help: "Keep the depth of the stack. Slices that leave it are dropped.")
+    var noEnlargeStack = false
+
+    @Flag(name: [.customLong("low-memory"), .customLong("low_memory")], help: "Do not keep frames in memory between the two passes.")
+    var lowMemory = false
+
+    @OptionGroup var z: ZOptionGroup
+    @OptionGroup var backend: BackendOption
+
+    func run() throws {
+        var o = ZCorrectOptions(input: URL(fileURLWithPath: file))
+        o.yaml = yaml.map { URL(fileURLWithPath: $0) }
+        o.position = position
+        o.enlargeStack = !noEnlargeStack
+        o.lowMemory = lowMemory
+        o.z = try z.make(defaultRegion: yaml == nil ? .wholeFrame : .embryoMask)
+        let start = Date()
+        _ = try ZCorrectPipeline.run(options: o, backend: backend.make(), context: consoleContext())
+        print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
+    }
+}
+
 struct ZShifts: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "z-shifts",
-        abstract: "Measure z drift of a TIFF or ND2 and save it as CSV, without writing a corrected stack. No xy alignment is applied.")
+        abstract: "Measure the z drift of an OME-TIFF or ND2 file and save it as CSV, without writing a corrected stack.")
 
     @Argument(help: "An OME-TIFF or ND2 file.")
     var file: String
+
+    @Option(help: "Threshold YAML from the Mask tool. It is needed only with --z-region mask.")
+    var yaml: String?
 
     @Option(help: "Embryo position (ND2 only).")
     var position = 0
@@ -193,15 +232,18 @@ struct ZShifts: ParsableCommand {
     var csv: String?
 
     @OptionGroup var z: ZOptionGroup
+    @OptionGroup var backend: BackendOption
 
     func run() throws {
         let url = URL(fileURLWithPath: file)
         let source: FrameSource = url.pathExtension.lowercased() == "nd2" ? try ND2Source(url: url) : try TIFFSource(url: url)
-        let options = try z.make(defaultRegion: .wholeFrame)
+        let options = try z.make(defaultRegion: yaml == nil ? .wholeFrame : .embryoMask)
+        let cfg = try yaml.map { try ThresholdConfig.load(URL(fileURLWithPath: $0)) }
         let out = csv.map { URL(fileURLWithPath: $0) }
             ?? url.deletingLastPathComponent().appendingPathComponent("\(PyFormat.stemWithoutOME(url))_z_shifts.csv")
         let start = Date()
-        _ = try ZMeasure.run(source: source, position: position, options: options, csv: out, context: consoleContext())
+        _ = try ZMeasure.run(source: source, position: position, options: options, thresholds: cfg, backend: backend.make(),
+                             csv: out, context: consoleContext())
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
     }
 }

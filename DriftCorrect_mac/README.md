@@ -3,7 +3,7 @@
 This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `find_threshold.py`,
 `centroid_align_xy.py`, and their GUIs). It contains:
 
-- **DriftCorrect.app**: a SwiftUI app. It has the launcher and three tool windows: Convert ND2 to TIFF, Mask embryo, and Align movie.
+- **DriftCorrect.app**: a SwiftUI app. It has the launcher and four tool windows: Convert ND2 to TIFF, Mask embryo, Align movie, and Correct z drift.
 - **dc**: a command-line tool. `dc convert` and `dc align` accept the same arguments as the Python workers.
 
 No Python, FFmpeg, or other runtime is necessary.
@@ -33,8 +33,9 @@ To work in Xcode, open `Package.swift`, select the `DriftCorrectApp` scheme, and
 ```bash
 dc convert /path/to/nd2_folder [--output_dir DIR] [--position 0] [--parallel false] [--concat_only]
 dc align P0_Venus_threshold.yaml [--use_nd2] [--fps 2] [--no_enlarge_canvas] [--use_gpu] [--low_memory]
-dc align P0_Venus_threshold.yaml --z-correct [--z-channel mCherry] [--z-region mask|whole|box] [--z-box x,y,w,h]
-dc z-shifts P0_concat.ome.tif --z-channel mCherry   # measure z drift only and save a CSV
+dc align P0_Venus_threshold.yaml --z-correct [--z-channel NAME] [--z-region mask|whole|box] [--z-box x,y,width,height]
+dc correct-z P0_concat_xy.ome.tif [--z-channel NAME] [--yaml P0_Venus_threshold.yaml] [--no_enlarge_stack] [--low_memory]
+dc z-shifts P0_concat_xy.ome.tif [--z-channel NAME]   # measures the z drift and saves a CSV
 dc nd2-info file.nd2 --checksums          # metadata and frame checksums as JSON
 dc bench                                  # CPU vs Metal timing
 ```
@@ -43,51 +44,43 @@ Add `--cpu` to `align` to use the CPU reference instead of Metal.
 
 ## Z correction
 
-The Align tool can also correct drift in z. It runs after the xy alignment. In the app, tick
-**Correct z drift (after xy)**; on the command line, add `--z-correct`.
+The tools can also correct drift along z. The correction keeps the same tissue in the same slice at every timepoint.
 
-Each timepoint is compared with the one before it, in three steps:
+There are two ways to run it.
 
-1. **Stage position.** The microscope records the stage z of every frame. When imaging is paused and the
-   embryo is re-centred in z, the change in stage z gives the size of the jump, even when the two stacks
-   no longer overlap.
-2. **Image comparison.** The slices of the two timepoints are compared at every offset near the stage
-   estimate, with a small xy search. The offset where the images differ least wins (sum of absolute
-   differences, not cross-correlation).
-3. **Nuclei.** Nucleus centres are detected in both timepoints and matched. When at least 30% of them agree
-   on one movement, the median of their z movements replaces the image estimate.
+- The **Correct z drift** window, or `dc correct-z FILE`, corrects one OME-TIFF or ND2 file without aligning it in xy. Use it on a file that is already steady in xy, such as the `{name}_xy.ome.tif` file from an earlier alignment. It writes `{name}_z.ome.tif` next to the input file.
+- The **Correct z drift (after xy)** option of the Align tool, or `dc align --z-correct`, runs the xy alignment and the z correction in one run. The z drift is measured on the frames after they are centred in xy. It writes `{name}_xy_z.ome.tif` in place of `{name}_xy.ome.tif`.
 
-The correction moves whole slices; nothing is interpolated. Empty (zero) slices fill the gaps, and the stack
-grows so that no slice is lost, as the xy canvas does. The first timepoint keeps its slices; every other
-timepoint moves to match it (`ZCorrectionOptions.referenceTimepoint` in the code).
+### How the drift is measured
 
-Settings:
+The tool compares each timepoint with the timepoint before it and estimates how many slices the tissue moved between them. It makes this estimate in three steps.
 
-- **Z channel**: the channel to follow. A nuclear marker works best, because its pattern does not change
-  with an oscillating reporter. The default is the threshold channel of the YAML; the app starts on a
-  channel named like a nuclear marker (mCherry, H2B, …) when there is one.
-- **Follow**: the embryo mask from the YAML, the whole frame, or a box that you draw over cells that
-  should stay in the same slice (`--z-box x,y,width,height` in pixels of the first timepoint).
+1. The microscope records the stage z position of every frame. When the person at the microscope pauses the imaging and centres the embryo again in z, the stage position changes. The size of that change gives the first estimate of the jump. This estimate is available even when the jump is so large that the two stacks have almost no slices in common.
+2. The tool then compares the images. It tries every offset close to the first estimate, together with a small search in xy, and it measures how different the slices of the two timepoints are at each offset. The measure is the sum of the absolute differences between the pixel values. The offset with the smallest difference becomes the second estimate.
+3. Finally the tool finds the centres of the nuclei in both timepoints and pairs each nucleus with the nuclei close to where the second estimate predicts it. When a large enough share of the nuclei agree on one movement, the median of their z movements replaces the second estimate. The thresholds are constants at the top of `ZDrift` in the code.
 
-Outputs, next to the usual ones:
+### How the correction is applied
 
-- `{name}_xy_z.ome.tif`: the corrected stack. `{name}_xy.ome.tif` is not written in the same run.
-- `{name}_xy_z_shifts.csv`: one row per timepoint with the stage z, the three estimates, the value used,
-  the whole-slice shift, and a flag for timepoints that need a look (`weak match`, `stage only`).
-- The movies are max projections over z, so z correction does not change them.
+The correction moves whole slices and does not interpolate between slices. Where a timepoint has no data for a slice, the output has an empty slice that is filled with zeros. The stack becomes deeper so that no slice is lost, in the same way that the xy canvas becomes larger. The first timepoint keeps its slices where they are, and every other timepoint moves to match it. The reference timepoint is `ZCorrectionOptions.referenceTimepoint` in the code, and the app does not show it yet.
 
-Things to know:
+The output can be much deeper than the input when the embryo was centred again several times, because each jump adds as many empty slices as the jump is large. When the stack is not enlarged, it keeps its depth and the slices that leave it are dropped. In the Align tool this follows **Enlarge canvas to prevent clipping**. In the Correct z drift window it is the option **Add empty slices so that no slice is lost**.
 
-- **Stage positions come from Convert.** The Convert tool now stores the stage z in the OME-TIFF (as the
-  standard `Plane` `PositionZ`), and concatenation and alignment keep it. TIFFs converted before this
-  change have none; z correction then uses the images alone and cannot measure a jump larger than the
-  stack. Convert the ND2 files again to get them, or use **Load directly from the raw ND2 file**.
-- **The file grows.** A movie whose embryo was re-centred several times needs many empty slices. For
-  example, jumps of 26, 15, 14, -4 and 6 slices turn a 27-slice stack into about 70 slices.
-- **Without "Enlarge canvas"** the stack keeps its depth and slices that leave it are dropped.
+### Settings
 
-`dc z-shifts FILE` measures the drift of a TIFF or ND2 and saves the CSV without writing a stack. It applies
-no xy alignment, so use it on files that are already steady in xy, or to preview the drift.
+- The z channel is the channel whose pattern the tool follows. A nuclear marker is the best choice, because its pattern stays the same while a reporter that oscillates changes from one timepoint to the next. The app selects a channel whose name looks like a nuclear marker when the file has one.
+- The region is the part of the image that should stay in the same slice. It can be the whole frame, the embryo mask, or a box that you draw over cells that should not move in z. The embryo mask needs the threshold YAML file from the Mask tool. On the command line the box is `--z-box x,y,width,height` in pixels of the first timepoint.
+
+### Outputs
+
+- The corrected stack is `{name}_z.ome.tif` from the Correct z drift window and `{name}_xy_z.ome.tif` from the Align tool.
+- A CSV file with the same name and the ending `_shifts.csv` has one row for each timepoint. A row holds the stage z position, the three estimates, the value that was used, the number of whole slices the timepoint was moved, and a flag when the estimate needs a look.
+- The movies of the Align tool are maximum projections along z, so z correction does not change them. The Correct z drift window does not write movies.
+
+`dc z-shifts FILE` measures the drift and saves the CSV file without writing a corrected stack.
+
+### Stage positions
+
+The Convert tool stores the stage z positions from the ND2 file in the OME-TIFF, as the standard `PositionZ` of each `Plane`. Concatenation, alignment and z correction keep them. An OME-TIFF that was converted before this change has no stage positions. For such a file the z correction uses the images alone, and it cannot measure a jump that leaves too few slices in common. To get the stage positions, convert the ND2 files again, or in the Align tool select **Load directly from the raw ND2 file**.
 
 ## Check the ND2 reader on your own files
 
@@ -112,6 +105,7 @@ python scripts/compare_tiffs.py python_out/X.ome.tif swift_out/X.ome.tif
 | Gaussian blur | Metal, separable (2·(2r+1) taps per pixel; the Python GPU path used a full (2r+1)² kernel) |
 | Z max-projection, sub-pixel and whole-pixel shift | Metal, zero-copy on unified memory |
 | Percentile, labelling, Otsu, multi-Otsu | CPU, on all cores; several frames are processed at the same time |
+| Z drift measurement and the moving of slices | CPU, on all cores |
 | HEVC movies | Media engine (VideoToolbox), encoded while frames pass through |
 | TIFF / ND2 I/O | `pread` into page-aligned buffers that Metal uses without a copy; reads, compute and writes overlap |
 
@@ -155,8 +149,8 @@ Other changes:
     - The unaligned movie is `{stem}_{channel}_unaligned.mp4` in both canvas modes.
 11. **Closing a tool window** does not stop a run. Quitting the app asks for confirmation first.
 12. **Legacy ND2 files** (JPEG 2000, format 1.0) and RGB ND2 files show an error message.
-13. **Z correction** is new; the Python scripts in this repository have none. See "Z correction" above.
-14. **Stage z positions** from the ND2 file are stored in every OME-TIFF.
+13. **Z correction.** The tools can correct drift along z, which the Python scripts in this repository do not do. The section "Z correction" above describes it.
+14. **Stage z positions.** The stage z positions from the ND2 file are stored in every OME-TIFF that the tools write.
 
 ## Code layout
 

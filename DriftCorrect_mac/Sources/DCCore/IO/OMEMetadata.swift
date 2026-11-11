@@ -11,10 +11,11 @@ public struct ImageMetadata: Equatable, Sendable {
     public var physicalSizeYUnit: String? = "µm"
     public var physicalSizeZUnit: String? = "µm"
     public var timeIncrementUnit: String? = "s"
-    /// Microscope stage z (µm) of the first slice of every timepoint. nil when the file does not record it.
-    /// Z correction uses the change between timepoints as its starting estimate.
+    /// The stage z position of the first slice of every timepoint, in micrometres. It is nil when the file does not
+    /// record it. Z correction uses the change between timepoints as its first estimate.
     public var stageZ: [Double]?
-    /// Signed stage z change from one slice to the next (µm); negative when the stack was acquired top-down.
+    /// The change in stage z from one slice to the next, in micrometres. It is negative when the stack was acquired
+    /// from top to bottom.
     public var stageZStep: Double?
 
     public init(channelNames: [String], physicalSizeX: Double? = nil, physicalSizeY: Double? = nil,
@@ -34,7 +35,7 @@ public struct ImageMetadata: Equatable, Sendable {
 
     public var voxel: VoxelSize { VoxelSize(x: physicalSizeX ?? 1, y: physicalSizeY ?? 1, z: physicalSizeZ ?? 1) }
 
-    /// The same metadata without stage positions (they differ between files of one experiment).
+    /// The same metadata without the stage positions, which differ between the files of one experiment.
     public var withoutStagePositions: ImageMetadata {
         var m = self
         m.stageZ = nil
@@ -58,7 +59,8 @@ public struct OMEPixels: Equatable, Sendable {
     public var attributes: [String: String] = [:]
     public var channelNames: [String?] = []
     public var firstIFD = 0
-    /// `Plane@PositionZ` of channel 0 by timepoint, for slice 0 and slice 1.
+    /// The `PositionZ` of the `Plane` elements of channel 0, by timepoint. Slice 0 gives the stage position and
+    /// slice 1 gives the z step.
     public var positionZSlice0: [Int: Double] = [:]
     public var positionZSlice1: [Int: Double] = [:]
 }
@@ -146,7 +148,7 @@ public enum OMEXML {
         m.physicalSizeYUnit = pixels.attributes["PhysicalSizeYUnit"] ?? "µm"
         m.physicalSizeZUnit = pixels.attributes["PhysicalSizeZUnit"] ?? "µm"
         m.timeIncrementUnit = pixels.attributes["TimeIncrementUnit"] ?? "s"
-        // Stage positions count only when every timepoint has one.
+        // The stage positions are used only when every timepoint has one.
         let z0 = (0..<pixels.sizeT).compactMap { pixels.positionZSlice0[$0] }
         if z0.count == pixels.sizeT && pixels.sizeT > 0 {
             m.stageZ = z0
@@ -190,7 +192,8 @@ public enum OMEXML {
             px += "<Channel ID=\"Channel:0:\(ci)\" SamplesPerPixel=\"1\"\(name)><LightPath/></Channel>"
         }
         px += "<TiffData IFD=\"0\" PlaneCount=\"\(t * c * z)\"/>"
-        // Stage z of every slice of channel 0 (standard OME `Plane@PositionZ`), when the microscope recorded it.
+        // Write the stage z position of every slice of channel 0 as the `PositionZ` of a `Plane` element, when the
+        // microscope recorded it.
         if let stage = m.stageZ, stage.count == t {
             let slices = m.stageZStep == nil ? 1 : z
             for ti in 0..<t {
