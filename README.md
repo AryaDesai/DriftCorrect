@@ -35,8 +35,7 @@ bash install_mac.sh
 ```
 
 The script installs Apple's command-line tools if needed, downloads the project,
-builds the app, and opens it. If Apple's installation dialog appears, complete
-it; the script continues automatically. The app is installed in `~/Applications`.
+builds the app, and opens it. If Apple's installation dialog appears, you can complete it/click yes/whatever and the script continues automatically. The app is installed in `~/Applications`.
 
 Run the same commands again to update either version.
 
