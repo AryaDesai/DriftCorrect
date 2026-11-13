@@ -178,7 +178,8 @@ class ThresholdApp(QWidget):
         title = QLabel("Find threshold for masking PSM")
         title.setStyleSheet("font: bold 14pt;")
         ctrl.addWidget(title)
-        legend = QLabel("Red overlay = mask  |  + = centroid")
+        legend = QLabel("Overlay = mask (class colours in Multi-Level Otsu)  |  + = centroid")
+        legend.setWordWrap(True)
         legend.setStyleSheet("color: gray;")
         ctrl.addWidget(legend)
         self.backend_label = QLabel("Compute: detecting…")
@@ -528,8 +529,7 @@ class ThresholdApp(QWidget):
             img, smoothed, mask, centroid, class_map, thresholds = self._compute(data, generation, *args)
             if data.T > 1:
                 data.prefetch((t + 1) % data.T, p)
-            rgba = np.ascontiguousarray(render_composite(img, mask, centroid, class_map=class_map,
-                                                         selected_levels=selected))
+            rgba = np.ascontiguousarray(render_composite(img, mask, centroid, class_map=class_map))
             area = int(mask.sum())
             mean_val = float(img[mask].mean()) if mask.any() else 0.0
             cap = (f"Embryo {p}  |  Area: {area} px ({area / mask.size * 100:.1f}%)  |  "
@@ -597,7 +597,7 @@ class ThresholdApp(QWidget):
         if by_class:
             levels = len(counts)
             colors = [np.asarray(LEVEL_COLORS[i % len(LEVEL_COLORS)]) / 255 for i in range(levels)]
-            labels = [f"Class {i} ({'selected' if i in selected else 'not displayed'})" for i in range(levels)]
+            labels = [f"Class {i} ({'selected' if i in selected else 'not selected'})" for i in range(levels)]
             ax.hist([edges[:-1]] * levels, bins=edges, weights=counts, stacked=True, color=colors, label=labels)
             markers = []
             for i, threshold in enumerate(thresholds):

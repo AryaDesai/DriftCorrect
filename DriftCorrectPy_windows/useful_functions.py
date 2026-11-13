@@ -709,9 +709,10 @@ def auto_contrast(img, percentile=99.5):
 LEVEL_COLORS = [(255, 50, 50), (50, 200, 255), (120, 255, 80), (255, 220, 40), (220, 100, 255)]
 
 
-def render_composite(img, mask, centroid, class_map=None, selected_levels=None):
-    """Gray image + translucent overlay (alpha 100, PIL alpha_composite arithmetic) + cyan crosshair.
+def render_composite(img, mask, centroid, class_map=None):
+    """Gray image + translucent overlay of the mask (alpha 100, PIL alpha_composite arithmetic) + cyan crosshair.
 
+    The overlay covers exactly the final mask: red, or with a class map, each pixel in its class colour.
     Returns an (Y, X, 4) uint8 RGBA array.
     """
     gray = auto_contrast(img)
@@ -720,15 +721,11 @@ def render_composite(img, mask, centroid, class_map=None, selected_levels=None):
     out[..., :3] = gray[..., None]
     out[..., 3] = 255
     color = np.zeros((h, w, 3), dtype=np.uint32)
-    covered = np.zeros((h, w), dtype=bool)
+    covered = np.asarray(mask, dtype=bool)
     if class_map is None:
-        covered = np.asarray(mask, dtype=bool)
         color[covered] = (255, 50, 50)
     else:
-        for i in selected_levels or []:
-            sel = class_map == i
-            color[sel] = LEVEL_COLORS[i % len(LEVEL_COLORS)]
-            covered |= sel
+        color[covered] = np.asarray(LEVEL_COLORS, dtype=np.uint32)[class_map[covered] % len(LEVEL_COLORS)]
     src_a = 100
     outa255 = src_a * 255 + 255 * (255 - src_a)
     coef1 = src_a * 255 * 255 * (1 << 7) // outa255
