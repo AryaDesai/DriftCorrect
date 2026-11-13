@@ -135,12 +135,16 @@ struct XYOptionGroup: ParsableArguments {
     var xyNoHold = false
 
     @Option(name: [.customLong("xy-smoothing"), .customLong("xy_smoothing")],
-            help: "The number of timepoints over which the position and direction of the body are averaged (default 10).")
+            help: "The number of timepoints over which the position of the body and the turn are averaged (default 10).")
     var xySmoothing: Double?
 
     @Option(name: [.customLong("xy-max-angle"), .customLong("xy_max_angle")],
             help: "The largest turn between two neighbouring timepoints that image matching looks for, in degrees (default 3). With 0 the matching only shifts.")
     var xyMaxAngle: Double?
+
+    @Flag(name: [.customLong("xy-no-rotation"), .customLong("xy_no_rotation")],
+          help: "Do not correct rotation. Image matching then only shifts.")
+    var xyNoRotation = false
 
     func make() throws -> XYMatchOptions? {
         switch xyMethod.lowercased() {
@@ -158,6 +162,7 @@ struct XYOptionGroup: ParsableArguments {
                 guard v.isFinite, v >= 0 else { throw ValidationError("--xy-max-angle must be 0 or a positive number of degrees") }
                 o.maximumAngle = v
             }
+            if xyNoRotation { o.maximumAngle = 0 }
             return o
         default: throw ValidationError("--xy-method must be centroid or image")
         }
@@ -357,7 +362,7 @@ struct ND2Info: ParsableCommand {
 }
 
 struct Bench: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Time the Gaussian and the shift on CPU and Metal.")
+    static let configuration = CommandConfiguration(abstract: "Time the Gaussian, the shift, and the shift with rotation on CPU and Metal.")
     @Option var size = 1024
     @Option var sigma = 30.0
     @Option var planes = 82
@@ -385,8 +390,12 @@ struct Bench: ParsableCommand {
             let ts = try median(7) {
                 _ = try backend.shift(frame, pad: Padding(top: 10, bottom: 10, left: 10, right: 10), dy: 3.37, dx: -2.61, mode: .subpixel)
             }
-            print(String(format: "%@: gaussian %dx%d sigma %.0f: %.1f ms | shift %d planes: %.1f ms | checksum %.3f",
-                         backend.name, size, size, sigma, tg * 1000, planes, ts * 1000, g.pixels[n / 2]))
+            let move = Rigid.shift(dx: -2.61, dy: 3.37).after(Rigid.rotation(degrees: 4, aboutX: Double(size) / 2, y: Double(size) / 2))
+            let tw = try median(7) {
+                _ = try backend.warp(frame, pad: Padding(top: 10, bottom: 10, left: 10, right: 10), transform: move)
+            }
+            print(String(format: "%@: gaussian %dx%d sigma %.0f: %.1f ms | shift %d planes: %.1f ms | shift with rotation: %.1f ms | checksum %.3f",
+                         backend.name, size, size, sigma, tg * 1000, planes, ts * 1000, tw * 1000, g.pixels[n / 2]))
         }
     }
 }

@@ -76,6 +76,25 @@ final class MetalParityTests: XCTestCase {
         }
     }
 
+    func testWarpMatchesCPU() throws {
+        for type in [SampleType.uint16, .float32, .uint8] {
+            let frame = volume(c: 2, z: 3, y: 101, x: 87, type: type, seed: 11)
+            let middle = (x: Double(frame.x - 1) / 2, y: Double(frame.y - 1) / 2)
+            for (degrees, dx, dy, pad) in [(0.0, 0.0, 0.0, Padding.none), (3.7, 5.25, -8.5, Padding(top: 9, bottom: 4, left: 2, right: 12)),
+                                           (-21.5, -30.0, 14.0, Padding(top: 20, bottom: 20, left: 20, right: 20)), (0.0, 4.0, -3.0, Padding.none)] {
+                let move = Rigid.shift(dx: dx, dy: dy).after(Rigid.rotation(degrees: degrees, aboutX: middle.x, y: middle.y))
+                let a = try gpu.warp(frame, pad: pad, transform: move)
+                let b = Shift.warp(frame, pad: pad, transform: move)
+                let pa = UnsafeBufferPointer(start: a.storage.raw.assumingMemoryBound(to: UInt16.self), count: a.elementCount)
+                let pb = UnsafeBufferPointer(start: b.storage.raw.assumingMemoryBound(to: UInt16.self), count: b.elementCount)
+                XCTAssertEqual(a.elementCount, b.elementCount)
+                var different = 0, largest = 0
+                for i in 0..<a.elementCount where pa[i] != pb[i] { different += 1; largest = max(largest, abs(Int(pa[i]) - Int(pb[i]))) }
+                XCTAssertEqual(different, 0, "\(type) \(degrees) degrees: \(different) of \(a.elementCount) pixels differ, by up to \(largest)")
+            }
+        }
+    }
+
     func testProjectionExact() throws {
         for type in [SampleType.uint16, .float32, .uint8] {
             let frame = volume(c: 3, z: 5, y: 40, x: 50, type: type, seed: 11)

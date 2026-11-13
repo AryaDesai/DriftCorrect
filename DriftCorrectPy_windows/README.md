@@ -31,14 +31,14 @@ The Alignment window has three tabs. **XYZ** corrects the movie in xy and then i
 
 1. Select the movie, which is an OME-TIFF or ND2 file.
 2. Choose the channel whose pattern is followed. A nuclear marker is the best choice.
-3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie with a suggested threshold. Adjust it and save, and the saved YAML file appears in the row. A YAML file saved earlier next to the movie is found automatically.
+3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie and starts from a threshold estimated from the image. Saving there writes the YAML file next to the movie and fills in the row. A YAML file saved earlier next to the movie is found automatically.
 4. Run.
 
-**Advanced options** holds the settings that change how the correction works. Each one has an explanation under it.
+**Advanced options** holds the settings that change how the correction works. Each one shows an explanation when the pointer rests on it.
 
 There are two xy methods.
 
-- **Image matching** compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. The embryo mask then holds the body in place: its centroid and its long axis, averaged over nearby timepoints, decide where the body sits and which way it points. The cells can move inside the body while the body stays put.
+- **Image matching** compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. The centroid of the embryo mask, averaged over nearby timepoints, then decides where the body sits. Sudden turns are removed, and slow turning stays as it was acquired. The cells can move inside the body while the body stays put.
 - **Mask centroid** moves the centroid of the embryo mask to the frame centre at every timepoint.
 
 Image matching can follow the whole frame, the embryo mask, or a box given as `x, y, width, height` in pixels of the first timepoint.

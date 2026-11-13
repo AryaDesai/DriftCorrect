@@ -11,7 +11,7 @@ public struct XYMatchOptions: Sendable {
     /// Hold the body in place with the embryo mask, as `Anchor` describes. Without it the frame can slowly travel
     /// when the cells move through the body.
     public var holdInPlace = true
-    /// The number of timepoints over which the position and direction of the body are averaged.
+    /// The number of timepoints over which the position of the body and the turn are averaged.
     public var smoothing = 10.0
     /// The largest turn between two neighbouring timepoints that the matching looks for, in degrees. With 0 the
     /// matching only shifts.

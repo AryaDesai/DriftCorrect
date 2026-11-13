@@ -198,11 +198,11 @@ public final class AlignPipeline {
         // The embryo mask is needed for the centroid, and for image matching or z correction that follow the mask.
         let needsMask = xyopt == nil || xyopt!.holdInPlace || xyopt?.region == .embryoMask || zopt?.region == .embryoMask
         guard !needsMask || cfg != nil else {
-            throw DCError("This run uses the embryo mask. Make the mask first, or choose settings that do not use it.")
+            throw DCError("These settings need an embryo mask, and no threshold YAML file was given.")
         }
         if let xy = xyopt {
             ctx.log("  XY: image matching of \(name(xyChannel)) (index \(xyChannel)), following \(describe(xy.region))")
-            ctx.log(xy.holdInPlace ? "      The embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
+            ctx.log(xy.holdInPlace ? "      The centroid of the embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
                                    : "      The body is not held in place.")
         } else {
             ctx.log("  XY: centroid of the embryo mask")

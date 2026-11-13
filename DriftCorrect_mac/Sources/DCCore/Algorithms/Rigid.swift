@@ -47,49 +47,31 @@ public struct Rigid: Equatable, Sendable {
     public var degrees: Double { atan2(c, a) * 180 / .pi }
 }
 
-/// Where the body sits in one timepoint, measured from the embryo mask.
+/// Where the body sits in one timepoint, which is the centroid of the embryo mask in pixels.
 public struct BodyPose: Sendable {
-    /// The centroid of the mask in pixels.
     public var x: Double, y: Double
-    /// The direction of the long axis of the mask in degrees, between -90 and 90.
-    public var angle: Double
-    /// The length of the mask along its long axis divided by its length across. A round mask has 1.
-    public var elongation: Double
 }
 
 /// Holds the body in place over the whole movie.
 ///
 /// Image matching between neighbouring timepoints measures sudden movement well, but the sum of its steps follows
-/// the cells. When the cells travel through the body, that sum slowly carries the frame away. The embryo mask
-/// says where the body is at every timepoint. It is rough at a single timepoint and reliable over many. The
-/// anchor therefore takes the movement between neighbouring timepoints from the image matching, and the position
-/// and direction of the body from the mask, averaged over nearby timepoints.
+/// the cells. When the cells travel through the body, that sum slowly carries the frame away and slowly turns it.
+/// The embryo mask says where the body is at every timepoint. It is rough at a single timepoint and reliable over
+/// many. The anchor therefore takes the movement between neighbouring timepoints from the image matching and the
+/// position of the body from the centroid of the mask, averaged over nearby timepoints.
+///
+/// The direction of the body is not taken from the mask. The long axis of a mask changes when the frame cuts off a
+/// different part of the tissue, without the body turning, and following it would turn the image for no reason.
+/// The microscope does not turn, so the direction in the acquired movie is the direction of the body. The anchor
+/// removes the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 public enum Anchor {
-    /// The long axis of a mask is used only when the mask is at least this elongated at every timepoint. The axis
-    /// of a nearly round mask has no stable direction.
-    static let minimumElongation = 1.5
-
-    /// Measure the centroid and the long axis of a mask. The result is nil when the mask is empty.
+    /// Measure the centroid of a mask. The result is nil when the mask is empty.
     public static func pose(of mask: Mask2D) -> BodyPose? {
         var n = 0.0, sx = 0.0, sy = 0.0
         for y in 0..<mask.height {
             for x in 0..<mask.width where mask.bits[y * mask.width + x] { n += 1; sx += Double(x); sy += Double(y) }
         }
-        guard n > 0 else { return nil }
-        let cx = sx / n, cy = sy / n
-        var xx = 0.0, yy = 0.0, xy = 0.0
-        for y in 0..<mask.height {
-            for x in 0..<mask.width where mask.bits[y * mask.width + x] {
-                let dx = Double(x) - cx, dy = Double(y) - cy
-                xx += dx * dx; yy += dy * dy; xy += dx * dy
-            }
-        }
-        xx /= n; yy /= n; xy /= n
-        // The long axis is the direction of largest spread, and the two spreads give the elongation.
-        let spread = (((xx - yy) / 2) * ((xx - yy) / 2) + xy * xy).squareRoot()
-        let long = (xx + yy) / 2 + spread, short = (xx + yy) / 2 - spread
-        return BodyPose(x: cx, y: cy, angle: 0.5 * atan2(2 * xy, xx - yy) * 180 / .pi,
-                        elongation: short > 0 ? (long / short).squareRoot() : .infinity)
+        return n > 0 ? BodyPose(x: sx / n, y: sy / n) : nil
     }
 
     /// Average `v` over nearby timepoints with a Gaussian of width `sigma` timepoints.
@@ -117,7 +99,7 @@ public enum Anchor {
     ///     ignored.
     ///   - poses: The pose of the body at each timepoint in its own frame. When it is nil, or a timepoint has no
     ///     pose, the body is not held and the result is the sum of the steps.
-    ///   - smoothing: The number of timepoints over which the position and direction of the body are averaged.
+    ///   - smoothing: The number of timepoints over which the position of the body and the turn are averaged.
     public static func transforms(steps: [Rigid], poses: [BodyPose?]?, smoothing: Double, width: Int, height: Int) -> [Rigid] {
         // Add up the steps. `chain[t]` moves timepoint t onto the first timepoint.
         var chain: [Rigid] = []
@@ -125,20 +107,13 @@ public enum Anchor {
         guard let poses = poses, poses.count == steps.count, !poses.contains(where: { $0 == nil }) else { return chain }
         let body = poses.map { $0! }
 
-        // Follow the centroid and the long axis of the body in the movie where the steps are added up, and average
-        // both over nearby timepoints.
-        let turned = unwrap(chain.map { $0.degrees }, period: 360)
+        // Follow the centroid of the body in the movie where the steps are added up, and average it over nearby
+        // timepoints.
         let centres = zip(chain, body).map { $0.apply(x: $1.x, y: $1.y) }
         let cx = smooth(centres.map { $0.x }, sigma: smoothing), cy = smooth(centres.map { $0.y }, sigma: smoothing)
-        var turnBack: [Double]
-        if body.allSatisfy({ $0.elongation >= minimumElongation }) {
-            // Turn the long axis back to its direction at the first timepoint.
-            let axis = unwrap(zip(body, turned).map { $0.angle + $1 }, period: 180)
-            turnBack = smooth(axis, sigma: smoothing).map { axis[0] - $0 }
-        } else {
-            // Without a usable long axis, remove only the sudden turns and leave the slow turning as it is.
-            turnBack = smooth(turned, sigma: smoothing).map { -$0 }
-        }
+        // Take the slow part of the summed turn back out. What stays is the sudden turns, which are removed.
+        let turned = unwrap(chain.map { $0.degrees }, period: 360)
+        let turnBack = smooth(turned, sigma: smoothing).map { -$0 }
         // Turn each timepoint about the averaged centroid and then move that centroid to the middle of the frame.
         let midX = Double(width - 1) / 2, midY = Double(height - 1) / 2
         return chain.indices.map { t in

@@ -4,7 +4,8 @@ import SwiftUI
 
 /// The Alignment window. It corrects a movie in xy and z, in xy only, or in z only. The user picks a movie and a
 /// channel and runs. When the chosen settings use the embryo mask, the Mask window opens from here. The settings
-/// that change how the correction works are under Advanced options, each with an explanation.
+/// that change how the correction works are under Advanced options. Each one shows an explanation when the pointer
+/// rests on it.
 struct AlignView: View {
     @ObservedObject var job: JobRunner
     @ObservedObject var mask: MaskModel
@@ -34,6 +35,7 @@ struct AlignView: View {
     @State private var xyBox: CGRect?
     @State private var hold = true
     @State private var smoothing = 10.0
+    @State private var correctRotation = true
     @State private var maximumAngle = 3.0
 
     // Advanced options for z
@@ -83,7 +85,7 @@ struct AlignView: View {
             HStack {
                 Text("Compute: \(Services.backend.name)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if hasMovie && needsMask && !hasMask { Text("Make the mask first").font(.caption).foregroundStyle(.secondary) }
+                if hasMovie && needsMask && !hasMask { Text("These settings need an embryo mask").font(.caption).foregroundStyle(.secondary) }
                 Button("Cancel") { job.cancel() }.disabled(!job.isRunning)
                 Button(mode == .xyz ? "Run xyz alignment" : mode == .xy ? "Run xy alignment" : "Run z correction") { run() }
                     .keyboardShortcut(.defaultAction)
@@ -107,10 +109,21 @@ struct AlignView: View {
         }
     }
 
-    /// A short explanation shown under a setting.
-    private func note(_ text: String) -> some View {
-        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
+    // The explanation of each setting. It is shown when the pointer rests on the setting.
+    static let channelHelp = "The matching follows the pattern of this channel. A nuclear marker works best because its pattern stays the same between timepoints."
+    static let maskHelp = "These settings need the embryo mask. Make mask opens the threshold window on this movie and starts from a threshold estimated from the image. Saving there writes a YAML file next to the movie, and this field then points to it. An existing threshold YAML file can also be selected."
+    static let methodHelp = "Image matching compares each timepoint with the one before it and finds the shift and the turn at which the two images differ least. Mask centroid moves the centroid of the embryo mask to the centre of the frame and does not turn the image."
+    static let xyFollowHelp = "The pixels that the matching compares. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
+    static let holdHelp = "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the centroid of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints."
+    static let smoothingHelp = "The centroid of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back."
+    static let rotationHelp = "Image matching also tries small turns between neighbouring timepoints and removes the sudden ones. With this off the matching only shifts, and the image is never turned."
+    static let angleHelp = "The matching tries turns up to this angle between two neighbouring timepoints."
+    static let zFollowHelp = "The pixels whose pattern must stay in the same slice. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
+    static let spanHelp = "Each timepoint is compared with the one before it and with the one this many timepoints earlier. A slow movement is too small to measure between neighbours and adds up to a measurable amount over several timepoints. With 1 only neighbours are compared."
+    static let dropHelp = "Timepoints whose z movement from the previous timepoint exceeds the maximum are left out of the output. Later timepoints are still corrected for that movement."
+    static let enlargeHelp = "Adds empty pixels around the frame and empty slices to the stack so that data moved by the correction stays in the file. Without it the file keeps its size and data that moves outside is lost."
+    static let fpsHelp = "The playback speed of the MP4 movies written next to the corrected file."
+    static let lowMemoryHelp = "Reads the movie from disk again when writing the output. Without it the frames are kept in memory between the two passes, which is faster and needs enough memory for the whole movie."
 
     @ViewBuilder
     private var channelPicker: some View {
@@ -120,11 +133,10 @@ struct AlignView: View {
             Picker("Channel:", selection: $channel) {
                 ForEach(channels.indices, id: \.self) { Text(channels[$0]).tag($0) }
             }
-            note("The channel whose pattern is followed. A nuclear marker is the best choice, because its pattern stays the same from one timepoint to the next.")
+            .help(Self.channelHelp)
         }
     }
 
-    @ViewBuilder
     private var maskRow: some View {
         LabeledContent("Embryo mask:") {
             HStack {
@@ -136,7 +148,7 @@ struct AlignView: View {
                 .disabled(!hasMovie)
             }
         }
-        note("These settings use the embryo mask. Make mask opens the threshold window with a suggested threshold. Adjust it, save, and the saved file appears here. You can also browse to a threshold YAML file you saved before.")
+        .help(Self.maskHelp)
     }
 
     @ViewBuilder
@@ -147,39 +159,42 @@ struct AlignView: View {
                     Text("Image matching").tag(false)
                     Text("Mask centroid").tag(true)
                 }
-                note("Image matching compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. Mask centroid moves the centre of the embryo mask to the middle of the frame, without turning.")
+                .help(Self.methodHelp)
                 if !centroidMethod {
-                    followPicker(selection: $xyFollow, target: .xy, box: xyBox)
-                    note("The part of the image that the matching compares. Whole frame uses every pixel. Embryo mask uses the tissue only. A box follows only the cells inside it.")
+                    followPicker(selection: $xyFollow, target: .xy, box: xyBox, help: Self.xyFollowHelp)
                     Toggle("Hold the body in place with the embryo mask", isOn: $hold).toggleStyle(.checkbox)
-                    note("Matching alone follows the cells. When cells move through the body, the frame slowly travels with them. With this on, the embryo mask keeps the body in the middle of the frame and pointing the same way.")
+                        .help(Self.holdHelp)
                     if hold {
                         LabeledContent("Averaging (timepoints):") { TextField("", value: $smoothing, format: .number).frame(width: 80) }
-                        note("The mask is rough at a single timepoint, so its position and direction are averaged over about this many timepoints. A small value follows the mask closely and can wobble. A large value is steadier and lets the body glide further before it is pulled back.")
+                            .help(Self.smoothingHelp)
                     }
-                    LabeledContent("Largest turn (degrees):") { TextField("", value: $maximumAngle, format: .number).frame(width: 80) }
-                    note("The largest turn between two neighbouring timepoints that the matching looks for. With 0 it only shifts and never turns.")
+                    Toggle("Correct rotation", isOn: $correctRotation).toggleStyle(.checkbox)
+                        .help(Self.rotationHelp)
+                    if correctRotation {
+                        LabeledContent("Largest turn (degrees):") { TextField("", value: $maximumAngle, format: .number).frame(width: 80) }
+                            .help(Self.angleHelp)
+                    }
                 }
             }
         }
         if doesZ {
             Section("Z") {
-                followPicker(selection: $zFollow, target: .z, box: zBox)
-                note("The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
+                followPicker(selection: $zFollow, target: .z, box: zBox, help: Self.zFollowHelp)
                 LabeledContent("Also compare this many timepoints back:") {
                     Stepper("\(span)", value: $span, in: 1...50)
                 }
-                note("A slow movement is too small to measure between neighbouring timepoints. Each timepoint is also compared with an earlier one, where the movement has added up. With 1 only neighbours are compared.")
+                .help(Self.spanHelp)
                 Toggle("Drop time points with large shifts", isOn: $dropLargeShifts).toggleStyle(.checkbox)
+                    .help(Self.dropHelp)
                 if dropLargeShifts {
                     LabeledContent("Maximum shift (slices):") { TextField("", value: $maximumShift, format: .number).frame(width: 80) }
+                        .help(Self.dropHelp)
                 }
-                note("Leaves out timepoints whose z movement from the timepoint before them is larger than the maximum, for example after the stage was moved. Later timepoints are still corrected for that movement.")
             }
         }
         Section("Output") {
             Toggle("Enlarge the canvas and the stack so that nothing is cut off", isOn: $enlargeCanvas).toggleStyle(.checkbox)
-            note("Adds empty pixels around the frame and empty slices to the stack, so that data moved by the correction stays in the file. With this off the file keeps its size and data that moves outside is lost.")
+                .help(Self.enlargeHelp)
             if doesXY {
                 LabeledContent("Movie speed:") {
                     HStack {
@@ -187,21 +202,22 @@ struct AlignView: View {
                         Text("fps")
                     }
                 }
-                note("The playback speed of the MP4 movies that are written next to the corrected file.")
+                .help(Self.fpsHelp)
             }
             Toggle("Use low-memory streaming", isOn: $lowMemory).toggleStyle(.checkbox)
-            note("Reads the movie from disk a second time when writing, instead of keeping it in memory. Leave this on when the file is larger than the available memory. Turning it off is faster for small files.")
+                .help(Self.lowMemoryHelp)
         }
     }
 
     /// A picker of the region to follow, with a button to draw the box when the box is chosen.
     @ViewBuilder
-    private func followPicker(selection: Binding<Follow>, target: BoxTarget, box: CGRect?) -> some View {
+    private func followPicker(selection: Binding<Follow>, target: BoxTarget, box: CGRect?, help: String) -> some View {
         Picker("Follow:", selection: selection) {
             Text("Whole frame").tag(Follow.whole)
             Text("Embryo mask").tag(Follow.mask)
             Text("A box I draw").tag(Follow.box)
         }
+        .help(help)
         if selection.wrappedValue == .box {
             LabeledContent("Box:") {
                 HStack {
@@ -270,7 +286,7 @@ struct AlignView: View {
         if needsMask {
             let url = expand(yamlPath)
             guard FileManager.default.fileExists(atPath: url.path) else {
-                showAlert("No mask", "These settings use the embryo mask. Make the mask first, or select a threshold YAML file."); return
+                showAlert("No mask", "These settings need an embryo mask. Make one with Make mask, or select a threshold YAML file."); return
             }
             yaml = url
         }
@@ -321,7 +337,7 @@ struct AlignView: View {
             m.region = r
             m.holdInPlace = hold
             m.smoothing = smoothing
-            m.maximumAngle = maximumAngle
+            m.maximumAngle = correctRotation ? maximumAngle : 0
             o.xyMatching = m
         }
         if doesZ { o.zCorrection = z }

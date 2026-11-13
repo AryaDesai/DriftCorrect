@@ -193,4 +193,39 @@ kernel void shift_integer_##SUFFIX(device const TYPE* src [[buffer(0)]], \
 SHIFT_KERNELS(u16, ushort, sample_u16)
 SHIFT_KERNELS(f32, float, sample_f32)
 SHIFT_KERNELS(u8, uchar, sample_u8)
+
+// Shift and rotation
+// The CPU prepares one table entry for every output pixel. It holds the upper left of the four source pixels and
+// the fractions toward the next pixel. An entry with x0 at the smallest int reads nothing. The kernel only reads
+// the four pixels of each plane and combines them. Each sum of two products is one product plus a fused multiply
+// and add, as in the CPU code, so that both round in the same places.
+struct WarpEntry { int x0; int y0; float fx; float fy; };
+struct WarpParams { uint outW; uint outH; uint srcW; uint srcH; uint planes; };
+
+#define WARP_KERNEL(SUFFIX, TYPE) \
+inline float warp_sample_##SUFFIX(device const TYPE* s, constant WarpParams& p, uint plane, int sy, int sx) { \
+    if (sy < 0 || sy >= int(p.srcH) || sx < 0 || sx >= int(p.srcW)) return 0.0f; \
+    return float(s[(ulong)plane * p.srcW * p.srcH + (ulong)sy * p.srcW + sx]); \
+} \
+kernel void warp_##SUFFIX(device const TYPE* src [[buffer(0)]], \
+                          device ushort* dst [[buffer(1)]], \
+                          device const WarpEntry* table [[buffer(2)]], \
+                          constant WarpParams& p [[buffer(3)]], \
+                          uint3 gid [[thread_position_in_grid]]) { \
+    const uint x = gid.x, y = gid.y, plane = gid.z; \
+    if (x >= p.outW || y >= p.outH || plane >= p.planes) return; \
+    const ulong k = (ulong)y * p.outW + x; \
+    const ulong o = (ulong)plane * p.outW * p.outH + k; \
+    WarpEntry e = table[k]; \
+    if (e.x0 == (-2147483647 - 1)) { dst[o] = 0; return; } \
+    float top = fma(warp_sample_##SUFFIX(src, p, plane, e.y0, e.x0 + 1), e.fx, \
+                    warp_sample_##SUFFIX(src, p, plane, e.y0, e.x0) * (1.0f - e.fx)); \
+    float bottom = fma(warp_sample_##SUFFIX(src, p, plane, e.y0 + 1, e.x0 + 1), e.fx, \
+                       warp_sample_##SUFFIX(src, p, plane, e.y0 + 1, e.x0) * (1.0f - e.fx)); \
+    dst[o] = to_u16(round(fma(bottom, e.fy, top * (1.0f - e.fy)))); \
+}
+
+WARP_KERNEL(u16, ushort)
+WARP_KERNEL(f32, float)
+WARP_KERNEL(u8, uchar)
 """#

@@ -31,7 +31,8 @@ public final class MetalBackend: ComputeBackend {
         guard let library = try? device.makeLibrary(source: metalSource, options: options) else { return nil }
         let names = ["max_project_u16", "max_project_u8", "max_project_f32", "gaussian_pass",
                      "shift_bilinear_u16", "shift_bilinear_f32", "shift_bilinear_u8",
-                     "shift_integer_u16", "shift_integer_f32", "shift_integer_u8"]
+                     "shift_integer_u16", "shift_integer_f32", "shift_integer_u8",
+                     "warp_u16", "warp_f32", "warp_u8"]
         for n in names {
             guard let f = library.makeFunction(name: n),
                   let p = try? device.makeComputePipelineState(function: f) else { return nil }
@@ -231,6 +232,31 @@ public final class MetalBackend: ComputeBackend {
                 enc.setBytes(&p, length: MemoryLayout<P>.size, index: 4)
                 dispatch(enc, "shift_bilinear_\(kind)", width: W, height: H, depth: frame.planeCount)
             }
+        }
+        return out
+    }
+
+    /// Move every plane by a rotation and a shift on the GPU. The CPU works out where each output pixel reads the
+    /// source, and the kernel interpolates every plane from that table. The result is the same as `Shift.warp`.
+    public func warp(_ frame: Volume, pad: Padding, transform: Rigid) throws -> Volume {
+        let H = frame.y + pad.top + pad.bottom, W = frame.x + pad.left + pad.right
+        let out = Volume(c: frame.c, z: frame.z, y: H, x: W, type: .uint16)
+        guard W > 0, H > 0, frame.planeCount > 0 else { return out }
+        let src = try wrap(frame.storage)
+        let dst = try wrap(out.storage)
+        let table = Shift.warpTable(width: frame.x, height: frame.y, pad: pad, transform: transform)
+        let tb = try table.withUnsafeBytes { r -> MTLBuffer in
+            guard let b = device.makeBuffer(bytes: r.baseAddress!, length: r.count, options: .storageModeShared) else { throw DCError("Metal: table") }
+            return b
+        }
+        struct P { var outW: UInt32; var outH: UInt32; var srcW: UInt32; var srcH: UInt32; var planes: UInt32 }
+        var p = P(outW: UInt32(W), outH: UInt32(H), srcW: UInt32(frame.x), srcH: UInt32(frame.y), planes: UInt32(frame.planeCount))
+        try run { enc in
+            enc.setBuffer(src, offset: 0, index: 0)
+            enc.setBuffer(dst, offset: 0, index: 1)
+            enc.setBuffer(tb, offset: 0, index: 2)
+            enc.setBytes(&p, length: MemoryLayout<P>.size, index: 3)
+            dispatch(enc, "warp_\(suffix(frame.type))", width: W, height: H, depth: frame.planeCount)
         }
         return out
     }

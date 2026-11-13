@@ -73,11 +73,14 @@ def parse_args(argv=None):
                         help="Do not hold the body in place with the embryo mask. The frame can then slowly travel "
                              "when the cells move through the body.")
     parser.add_argument("--xy_smoothing", type=float, default=10.0,
-                        help="The number of timepoints over which the position and direction of the body are averaged "
+                        help="The number of timepoints over which the position of the body and the turn are averaged "
                              "(default: 10).")
     parser.add_argument("--xy_max_angle", type=float, default=3.0,
                         help="The largest turn between two neighbouring timepoints that image matching looks for, in "
                              "degrees (default: 3). With 0 the matching only shifts.")
+
+    parser.add_argument("--xy_no_rotation", action="store_true",
+                        help="Do not correct rotation. Image matching then only shifts.")
 
     parser.add_argument("--z_correct", action="store_true", help="Correct z drift after the xy alignment.")
     parser.add_argument("--z_channel", help="The channel to follow in z, given as a name or as an index that starts at "
@@ -94,6 +97,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.shift_mode is None:
         args.shift_mode = "integer" if args.use_gpu else "subpixel"
+    if args.xy_no_rotation:
+        args.xy_max_angle = 0.0
     if args.xy_smoothing < 0 or args.xy_max_angle < 0:
         parser.error("--xy_smoothing and --xy_max_angle must be 0 or positive")
     if args.yaml_file is None and args.input is None:
@@ -205,10 +210,10 @@ def align(args):
     centroid_method = args.xy_method == "centroid"
     needs_mask = centroid_method or hold or xy_follow == "mask" or z_follow == "mask"
     if needs_mask and cfg is None:
-        raise ValueError("This run uses the embryo mask. Make the mask first, or choose settings that do not use it.")
+        raise ValueError("These settings need an embryo mask, and no threshold YAML file was given.")
     if image:
         log(f"  XY: image matching of {channel_name(xy_channel)} (index {xy_channel}), following {describe_follow(xy_follow)}")
-        log(f"      The embryo mask holds the body in place, averaged over {args.xy_smoothing:g} timepoints." if hold
+        log(f"      The centroid of the embryo mask holds the body in place, averaged over {args.xy_smoothing:g} timepoints." if hold
             else "      The body is not held in place.")
         # The matching runs on the GPU when the backend does.
         xp, nd = image_match.modules(backend.is_gpu)

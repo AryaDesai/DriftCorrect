@@ -102,6 +102,34 @@ public enum Shift {
         return out
     }
 
+    /// Where one output pixel of a move reads the source. `x0` and `y0` are the upper left of the four source pixels,
+    /// and `fx` and `fy` are the fractions toward the next pixel. A pixel that reads nothing has `x0` at `Int32.min`.
+    public struct WarpEntry {
+        public var x0: Int32, y0: Int32
+        public var fx: Float, fy: Float
+    }
+
+    /// Work out where every output pixel reads the source when a frame of `width` by `height` pixels is moved by
+    /// `transform` onto its canvas plus `pad`. The positions are the same for every plane, so they are worked out
+    /// once. The CPU and the GPU both use this table, which keeps their results identical.
+    public static func warpTable(width X: Int, height Y: Int, pad: Padding, transform: Rigid) -> [WarpEntry] {
+        let H = Y + pad.top + pad.bottom, W = X + pad.left + pad.right
+        // Each output pixel reads the source at the position that the opposite transform gives.
+        let back = Rigid.shift(dx: Double(pad.left), dy: Double(pad.top)).after(transform).inverse
+        var table = [WarpEntry](repeating: WarpEntry(x0: Int32.min, y0: 0, fx: 0, fy: 0), count: W * H)
+        table.withUnsafeMutableBufferPointer { out in
+            Parallel.forEach(H) { y in
+                for x in 0..<W {
+                    let s = back.apply(x: Double(x), y: Double(y))
+                    if s.x <= -1 || s.y <= -1 || s.x >= Double(X) || s.y >= Double(Y) { continue }
+                    let x0 = Int(s.x.rounded(.down)), y0 = Int(s.y.rounded(.down))
+                    out[y * W + x] = WarpEntry(x0: Int32(x0), y0: Int32(y0), fx: Float(s.x - Double(x0)), fy: Float(s.y - Double(y0)))
+                }
+            }
+        }
+        return table
+    }
+
     /// Move every plane of `frame` by `transform` onto a canvas of the size of `frame` plus `pad`, and convert the
     /// result to uint16. `transform` is in pixels of the frame. Values between pixels are interpolated from the four
     /// nearest pixels, and a pixel outside the frame counts as 0.
@@ -109,35 +137,21 @@ public enum Shift {
         let H = frame.y + pad.top + pad.bottom, W = frame.x + pad.left + pad.right
         let X = frame.x, Y = frame.y
         let out = Volume(c: frame.c, z: frame.z, y: H, x: W, type: .uint16)
-        // Each output pixel reads the source at the position that the opposite transform gives. The positions are
-        // the same for every plane, so they are worked out once.
-        let back = Rigid.shift(dx: Double(pad.left), dy: Double(pad.top)).after(transform).inverse
-        var x0s = [Int32](repeating: Int32.min, count: W * H), y0s = [Int32](repeating: 0, count: W * H)
-        var fxs = [Float](repeating: 0, count: W * H), fys = [Float](repeating: 0, count: W * H)
-        x0s.withUnsafeMutableBufferPointer { px in y0s.withUnsafeMutableBufferPointer { py in
-            fxs.withUnsafeMutableBufferPointer { pfx in fys.withUnsafeMutableBufferPointer { pfy in
-                Parallel.forEach(H) { y in
-                    for x in 0..<W {
-                        let s = back.apply(x: Double(x), y: Double(y))
-                        if s.x <= -1 || s.y <= -1 || s.x >= Double(X) || s.y >= Double(Y) { continue }
-                        let x0 = Int(s.x.rounded(.down)), y0 = Int(s.y.rounded(.down)), k = y * W + x
-                        px[k] = Int32(x0); py[k] = Int32(y0)
-                        pfx[k] = Float(s.x - Double(x0)); pfy[k] = Float(s.y - Double(y0))
-                    }
-                }
-            } }
-        } }
+        let table = warpTable(width: X, height: Y, pad: pad, transform: transform)
         Parallel.forEach(frame.planeCount) { plane in
             let dst = out.planePointer(plane).assumingMemoryBound(to: UInt16.self)
             @inline(__always) func src(_ yy: Int, _ xx: Int) -> Float {
                 (yy < 0 || yy >= Y || xx < 0 || xx >= X) ? 0 : frame.sample(plane: plane, index: yy * X + xx)
             }
             for k in 0..<(W * H) {
-                if x0s[k] == Int32.min { dst[k] = 0; continue }
-                let x0 = Int(x0s[k]), y0 = Int(y0s[k]), fx = fxs[k], fy = fys[k]
-                let v = (src(y0, x0) * (1 - fx) + src(y0, x0 + 1) * fx) * (1 - fy)
-                    + (src(y0 + 1, x0) * (1 - fx) + src(y0 + 1, x0 + 1) * fx) * fy
-                dst[k] = toUInt16(v.rounded())
+                let e = table[k]
+                if e.x0 == Int32.min { dst[k] = 0; continue }
+                let x0 = Int(e.x0), y0 = Int(e.y0)
+                // Each sum of two products is written as one product plus a fused multiply and add. The GPU kernel
+                // does the same, so that both round in the same places and give the same values.
+                let top = (src(y0, x0) * (1 - e.fx)).addingProduct(src(y0, x0 + 1), e.fx)
+                let bottom = (src(y0 + 1, x0) * (1 - e.fx)).addingProduct(src(y0 + 1, x0 + 1), e.fx)
+                dst[k] = toUInt16((top * (1 - e.fy)).addingProduct(bottom, e.fy).rounded())
             }
         }
         return out

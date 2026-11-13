@@ -177,7 +177,7 @@ class ThresholdApp(QWidget):
 
     def _suggest(self, channel):
         """Choose `channel` and set a starting percentile estimated from the first timepoint. The estimate is the
-        share of pixels below the Otsu threshold of the blurred image. The user adjusts it or accepts it."""
+        share of pixels below the Otsu threshold of the blurred image."""
         channel = min(max(0, channel), self.C - 1)
         self.channel_combo.setCurrentIndex(channel)
         try:
@@ -189,7 +189,7 @@ class ThresholdApp(QWidget):
             return
         percentile = 100.0 * float((smoothed <= threshold).mean())
         self.pct_slider.setValue(int(np.clip(round(percentile * 2), 20, 199)))
-        self.status_label.setText(self.status_label.text() + f"  Suggested percentile {self.pct_slider.value() / 2:g}. Adjust it and save.")
+        self.status_label.setText(self.status_label.text() + f"  Percentile set to {self.pct_slider.value() / 2:g} from an Otsu estimate.")
         self._update()
 
     # ── UI construction ──────────────────────────────────────────────────

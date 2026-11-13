@@ -47,12 +47,12 @@ The Alignment window has three tabs. **XYZ** corrects the movie in xy and then i
 
 1. Select the movie, which is an OME-TIFF or ND2 file.
 2. Choose the channel whose pattern is followed. A nuclear marker is the best choice.
-3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie with a suggested threshold. Adjust it and save, and the saved YAML file appears in the row. A YAML file saved earlier next to the movie is found automatically.
+3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie and starts from a threshold estimated from the image. Saving there writes the YAML file next to the movie and fills in the row. A YAML file saved earlier next to the movie is found automatically.
 4. Run.
 
 With the default settings, XYZ and XY only use the mask to hold the body in place, and Z only does not need it.
 
-**Advanced options** holds the settings that change how the correction works. Each one has an explanation under it.
+**Advanced options** holds the settings that change how the correction works. Each one shows an explanation when the pointer rests on it.
 
 ## Image matching
 
@@ -75,9 +75,9 @@ The **Method** under Advanced options, or `dc align --xy-method`, chooses how th
 
 Image matching follows the cells. When the cells move through the body, as they do in a growing tail, the sum of the steps slowly carries the frame away from where it started. The output then shows the frame travelling across an empty canvas.
 
-With **Hold the body in place with the embryo mask**, which is on by default, the tool uses the mask to say where the body is. It follows the centroid of the mask and the direction of its long axis, and averages both over nearby timepoints, because the mask is rough at a single timepoint and reliable over many. Each timepoint is then placed so that the averaged centroid sits in the middle of the frame and the long axis keeps the direction it had at the first timepoint. The sudden movement between neighbouring timepoints still comes from the image matching, so jumps and jitter are removed, and the cells are free to move inside the body.
+With **Hold the body in place with the embryo mask**, which is on by default, the tool uses the mask to say where the body is. It follows the centroid of the mask and averages it over nearby timepoints, because the mask is rough at a single timepoint and reliable over many. Each timepoint is then placed so that the averaged centroid sits in the middle of the frame. The sudden movement between neighbouring timepoints still comes from the image matching, so jumps and jitter are removed, and the cells are free to move inside the body.
 
-The long axis is used only when the mask is clearly elongated at every timepoint. For a nearly round mask the tool removes sudden turns and leaves slow turning as it is.
+The direction of the body is not taken from the mask. The long axis of a mask changes when the frame cuts off a different part of the tissue, without the body turning, and following it would turn the image for no reason. The microscope does not turn, so the direction in the acquired movie is the direction of the body. The tool removes the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 
 The output is written with one move for each timepoint, which is a rotation and a shift with interpolation between pixels.
 

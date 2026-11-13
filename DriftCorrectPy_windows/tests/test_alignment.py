@@ -101,7 +101,7 @@ def test_anchor_holds_the_body():
     for t in range(T):
         jump = 20.0 if t >= 10 else 0.0
         steps.append(image_match.shift(-21 if t == 10 else -1, 0) @ image_match.rotation(0.5, 80 + jump, 40))
-        poses.append((80 + jump, 40.0, 20.0, 3.0))
+        poses.append((80 + jump, 40.0))
     held = image_match.place(steps, poses, 2, w, h)
     free = image_match.place(steps, None, 2, w, h)
     for t in range(6, 24):

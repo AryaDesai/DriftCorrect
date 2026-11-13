@@ -188,7 +188,7 @@ final class MaskModel: ObservableObject {
     }
 
     /// Set the channel and estimate a starting percentile from the first timepoint. The estimate is the share of
-    /// pixels below the Otsu threshold of the blurred image. The user adjusts it or accepts it.
+    /// pixels below the Otsu threshold of the blurred image.
     private func suggest(channel: Int, source src: ProjectionSource) {
         channelIndex = channel
         let sigma = Double(self.sigma)
@@ -201,7 +201,7 @@ final class MaskModel: ObservableObject {
             await MainActor.run {
                 self.method = .percentile
                 self.percentileSteps = min(199, max(20, Int((percentile * 2).rounded())))
-                self.status += "  Suggested percentile \(PyFormat.g(self.percentile)). Adjust it and save."
+                self.status += "  Percentile set to \(PyFormat.g(self.percentile)) from an Otsu estimate."
             }
         }
     }

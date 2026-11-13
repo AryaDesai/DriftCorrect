@@ -25,8 +25,6 @@ ANGLE_STEP = 0.5
 TURN_MARGIN = 0.02
 # A match with a mismatch above this value is flagged in the log.
 WEAK_COST = 0.27
-# The long axis of a mask is used only when the mask is at least this elongated at every timepoint.
-MINIMUM_ELONGATION = 1.5
 
 
 def rotation(degrees, cx, cy):
@@ -268,26 +266,21 @@ def region(follow, mask, to_first, width, height):
 # The anchor
 #
 # Image matching between neighbouring timepoints measures sudden movement well, but the sum of its steps follows
-# the cells. When the cells travel through the body, that sum slowly carries the frame away. The embryo mask says
-# where the body is at every timepoint. It is rough at a single timepoint and reliable over many. The anchor
-# therefore takes the movement between neighbouring timepoints from the image matching, and the position and
-# direction of the body from the mask, averaged over nearby timepoints.
+# the cells. When the cells travel through the body, that sum slowly carries the frame away and slowly turns it.
+# The embryo mask says where the body is at every timepoint. It is rough at a single timepoint and reliable over
+# many. The anchor therefore takes the movement between neighbouring timepoints from the image matching and the
+# position of the body from the centroid of the mask, averaged over nearby timepoints.
+#
+# The direction of the body is not taken from the mask. The long axis of a mask changes when the frame cuts off a
+# different part of the tissue, without the body turning, and following it would turn the image for no reason. The
+# microscope does not turn, so the direction in the acquired movie is the direction of the body. The anchor removes
+# the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 
 
 def pose(mask):
-    """Measure the body from its mask. Return (x, y, angle, elongation), or None when the mask is empty. The
-    angle is the direction of the long axis in degrees. The elongation is the length along the long axis divided
-    by the length across, which is 1 for a round mask."""
+    """Return the centroid (x, y) of a mask, or None when the mask is empty."""
     ys, xs = np.nonzero(mask)
-    if len(xs) == 0:
-        return None
-    cx, cy = xs.mean(), ys.mean()
-    dx, dy = xs - cx, ys - cy
-    xx, yy, xy = (dx * dx).mean(), (dy * dy).mean(), (dx * dy).mean()
-    # The long axis is the direction of largest spread, and the two spreads give the elongation.
-    spread = math.sqrt(((xx - yy) / 2) ** 2 + xy * xy)
-    long, short = (xx + yy) / 2 + spread, (xx + yy) / 2 - spread
-    return cx, cy, 0.5 * math.degrees(math.atan2(2 * xy, xx - yy)), math.sqrt(long / short) if short > 0 else math.inf
+    return (xs.mean(), ys.mean()) if len(xs) else None
 
 
 def smooth(values, sigma):
@@ -316,25 +309,19 @@ def place(steps, poses, smoothing, width, height):
     """Return the transform that places every timepoint in the output. `steps[t]` moves timepoint t onto the
     timepoint before it, and the first one is ignored. `poses[t]` is the pose of the body at timepoint t in its own
     frame. When `poses` is None, or a timepoint has no pose, the body is not held and the result is the sum of the
-    steps. `smoothing` is the number of timepoints over which the position and direction of the body are averaged."""
+    steps. `smoothing` is the number of timepoints over which the position of the body and the turn are averaged."""
     # Add up the steps. `chain[t]` moves timepoint t onto the first timepoint.
     chain = []
     for t, s in enumerate(steps):
         chain.append(np.eye(3) if t == 0 else chain[-1] @ s)
     if poses is None or len(poses) != len(steps) or any(p is None for p in poses):
         return chain
-    # Follow the centroid and the long axis of the body in the movie where the steps are added up, and average
-    # both over nearby timepoints.
-    turned = unwrap([angle_of(m) for m in chain], 360)
+    # Follow the centroid of the body in the movie where the steps are added up, and average it over nearby
+    # timepoints.
     centres = [apply(m, p[0], p[1]) for m, p in zip(chain, poses)]
     cx, cy = smooth([c[0] for c in centres], smoothing), smooth([c[1] for c in centres], smoothing)
-    if all(p[3] >= MINIMUM_ELONGATION for p in poses):
-        # Turn the long axis back to its direction at the first timepoint.
-        axis = unwrap([p[2] + a for p, a in zip(poses, turned)], 180)
-        turn_back = axis[0] - smooth(axis, smoothing)
-    else:
-        # Without a usable long axis, remove only the sudden turns and leave the slow turning as it is.
-        turn_back = -smooth(turned, smoothing)
+    # Take the slow part of the summed turn back out. What stays is the sudden turns, which are removed.
+    turn_back = -smooth(unwrap([angle_of(m) for m in chain], 360), smoothing)
     # Turn each timepoint about the averaged centroid and then move that centroid to the middle of the frame.
     mid_x, mid_y = (width - 1) / 2, (height - 1) / 2
     return [shift(mid_x - cx[t], mid_y - cy[t]) @ rotation(turn_back[t], cx[t], cy[t]) @ chain[t] for t in range(len(chain))]

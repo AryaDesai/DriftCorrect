@@ -355,7 +355,7 @@ final class ZCorrectionTests: XCTestCase {
         for t in 0..<T {
             let jump = t >= 10 ? 20.0 : 0
             steps.append(Rigid.shift(dx: t == 10 ? -21 : -1, dy: 0).after(Rigid.rotation(degrees: 0.5, aboutX: 80 + jump, y: 40)))
-            poses.append(BodyPose(x: 80 + jump, y: 40, angle: 20, elongation: 3))
+            poses.append(BodyPose(x: 80 + jump, y: 40))
         }
         let held = Anchor.transforms(steps: steps, poses: poses, smoothing: 2, width: w, height: h)
         let free = Anchor.transforms(steps: steps, poses: nil, smoothing: 2, width: w, height: h)
