@@ -15,15 +15,14 @@ The script downloads the project, installs uv and the Python dependencies in a
 private environment, and creates a desktop shortcut. Launch with that shortcut
 or type `driftcorrect` in the same prompt. FFmpeg is included.
 
-No administrator access is needed: uv, Python dependencies, and the app are
+No administrator access should be needed. uv, Python dependencie and the app are
 installed under `%LOCALAPPDATA%\DriftCorrect`. Dependencies are defined in
-`pyproject.toml` and pinned in `uv.lock`; setup uses `uv sync --locked`.
+`pyproject.toml` and pinned in `uv.lock`. We use `uv sync --locked` for setup
 
-NVIDIA acceleration is automatic. Setup detects the driver's CUDA support,
-installs the matching locked CuPy and CUDA runtime dependencies, and checks a
-GPU calculation. It tries CUDA 12 if CUDA 13 does not work, and uses CPU mode
-when no supported GPU is available. An existing NVIDIA driver is required;
-the installer does not change drivers or require a system-wide CUDA toolkit.
+Setup process detects the driver's CUDA support,
+installs the matching locked CuPy and CUDA runtime dependencies and runs a
+GPU calculation as a check. It tries CUDA 12 if CUDA 13 does not work, and uses CPU mode
+when no supported GPU is available. An existing NVIDIA driver is required, this should be included with most computers with an NVIDIA GPU.
 
 ## Mac
 
