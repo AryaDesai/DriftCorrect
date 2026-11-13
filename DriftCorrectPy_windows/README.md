@@ -1,6 +1,6 @@
 # Drift correction (Python, CUDA or CPU)
 
-Tools to convert ND2 files, mask embryos, align movies in XY, register in Z, and apply manual XY shifts. The results are the same as the Swift app and the original scripts.
+Tools to convert ND2 files, mask embryos and align movies in XY. The results are the same as the Swift app and the original scripts.
 
 ## Install
 
@@ -14,15 +14,13 @@ Tools to convert ND2 files, mask embryos, align movies in XY, register in Z, and
 
 ## Start
 
-Run `python drift_correct.py`. The launcher has five buttons:
+Run `python drift_correct.py`. The launcher has three buttons:
 
 | Button | Script | Output |
 |---|---|---|
 | Convert ND2 to TIFF | `nd2_to_tif.py` | `{name}_P{p}.ome.tif`, `P{p}_concat.ome.tif` |
 | Mask embryo | `find_threshold.py` | `…_threshold.yaml` next to the input |
 | Align movie | `centroid_align_xy.py` | `aligned_{base}/` with OME-TIFF and MP4 files |
-| Z alignment | `z_align.py` | `{stem}_z_shifts.csv`, `{stem}_z.ome.tif` |
-| Manual XY shift | `manual_xy.py` | `aligned_{stem}/{stem}_xy_manual.ome.tif` and MP4 files |
 
 Each script also runs from the command line. Use `--help` to see its options.
 
@@ -46,11 +44,6 @@ Each script also runs from the command line. Use `--help` to see its options.
 - Reading, calculation and writing run at the same time in a thread pipeline.
 - Movies are encoded during the alignment passes. The encoder order is NVENC, VideoToolbox, Quick Sync, then CPU.
 - Output files are written under a temporary name and renamed when complete. A stopped run leaves no partial file.
-- Z alignment and Manual XY shift have windows.
-
-## Tests
-
-Run `python -m pytest tests`. The tests compare the results with reference data from the original scripts. On a CUDA machine they also check the GPU backend.
 
 ## Packaging
 

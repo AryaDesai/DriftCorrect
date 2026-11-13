@@ -1,9 +1,9 @@
 """Entry point for the drift-correction tools.
 
 With no arguments it opens the launcher. "--tool MODE [ARGS…]" runs one tool:
-a window (convert-gui, mask-gui, align-gui, z-gui, manual-gui) or a worker
-process that a window starts (convert-worker, align-worker, z-worker,
-manual-worker). Workers take the same arguments as their scripts.
+a window (convert-gui, mask-gui, align-gui) or a worker process that a window
+starts (convert-worker, align-worker). Workers take the same arguments as
+their scripts.
 """
 
 

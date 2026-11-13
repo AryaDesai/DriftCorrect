@@ -12,11 +12,9 @@ The heavy per-frame work (Z projection, Gaussian, shift) goes through
 backend.py, which uses CUDA when available and NumPy/SciPy otherwise.
 """
 
-import csv
 import json
 import os
 import sys
-import tempfile
 import threading
 import uuid
 import xml.etree.ElementTree as ET
@@ -28,17 +26,12 @@ from types import SimpleNamespace
 import numpy as np
 import tifffile
 import yaml
-from scipy import fft as sp_fft
 from scipy.ndimage import label
 
 from backend import get_backend
 from multi_otsu import MAX_OTSU_LEVELS, MULTIOTSU_NBINS, multiotsu_thresholds_and_classes
 
 # ── General helpers ──────────────────────────────────────────────────────────
-
-
-class Cancelled(Exception):
-    """Raised when the user stops a run."""
 
 
 def log(msg=""):
@@ -153,17 +146,6 @@ def resolve_tif_from_yaml(yaml_path, cfg):
 # ── ND2 input ────────────────────────────────────────────────────────────────
 
 
-def load_nd2_metadata(file_path):
-    """(channel_names, vox, period_s) without reading image data."""
-    import nd2
-
-    with nd2.ND2File(file_path) as f:
-        channel_names = [ch.channel.name for ch in f.metadata.channels]
-        vox = f.voxel_size()
-        period_s = next((loop.parameters.periodMs / 1000.0 for loop in f.experiment if loop.type == "TimeLoop"), None)
-    return channel_names, vox, period_s
-
-
 class ND2Reader:
     """Frames of an ND2 file as (C, Z, Y, X), addressed by axis name.
 
@@ -216,16 +198,6 @@ class ND2Reader:
 
 
 # ── TIFF input ───────────────────────────────────────────────────────────────
-
-
-def load_tif_metadata(file_path):
-    """(channel_names, vox, period_s) of an OME, ImageJ, or tifffile JSON TIFF.
-
-    Each value is read on its own: a missing PhysicalSizeZ no longer discards
-    the channel names.
-    """
-    with tifffile.TiffFile(file_path) as tif:
-        return _tif_metadata(tif, _stack_shape(tif)[0][1])
 
 
 def _tif_metadata(tif, n_channels):
@@ -738,184 +710,6 @@ def render_composite(img, mask, centroid, class_map=None):
         if ya <= yb and xa <= xb:
             out[ya:yb + 1, xa:xb + 1] = (0, 255, 255, 255)
     return out
-
-
-# ── Z registration ───────────────────────────────────────────────────────────
-
-
-def _upsampled_dft(data, region, upsample, offsets):
-    for n_items, ax_offset in list(zip(data.shape, offsets))[::-1]:
-        kernel = (np.arange(region) - ax_offset)[:, None] * sp_fft.fftfreq(n_items, upsample)
-        kernel = np.exp(-1j * 2 * np.pi * kernel)
-        data = np.tensordot(kernel, data, axes=(1, -1))
-    return data
-
-
-def phase_cross_correlation(reference, moving, upsample_factor=1):
-    """skimage.registration.phase_cross_correlation (normalization="phase") — shift only."""
-    src = sp_fft.fftn(reference)
-    tgt = sp_fft.fftn(moving)
-    shape = src.shape
-    product = src * tgt.conj()
-    eps = np.finfo(product.real.dtype).eps
-    product /= np.maximum(np.abs(product), 100 * eps)
-    cc = sp_fft.ifftn(product)
-    maxima = np.unravel_index(np.argmax(np.abs(cc)), cc.shape)
-    midpoint = np.array([np.trunc(n / 2) for n in shape])
-    shift = np.stack(maxima).astype(np.float64)
-    shift[shift > midpoint] -= np.array(shape)[shift > midpoint]
-    if upsample_factor > 1:
-        up = np.float64(upsample_factor)
-        shift = np.round(shift * up) / up
-        region = np.ceil(up * 1.5)
-        dftshift = np.trunc(region / 2.0)
-        cc = _upsampled_dft(product.conj(), int(region), up, dftshift - shift * up).conj()
-        maxima = np.stack(np.unravel_index(np.argmax(np.abs(cc)), cc.shape)).astype(np.float64)
-        shift += (maxima - dftshift) / up
-    for d in range(len(shape)):
-        if shape[d] == 1:
-            shift[d] = 0
-    return shift
-
-
-def _clip_roi_zyx(vol, roi):
-    if roi is None:
-        return vol
-    y0, y1, x0, x1 = [int(v) for v in roi]
-    _, ym, xm = vol.shape
-    y0 = max(0, min(y0, ym - 1))
-    y1 = max(y0 + 1, min(y1, ym))
-    x0 = max(0, min(x0, xm - 1))
-    x1 = max(x0 + 1, min(x1, xm))
-    return vol[:, y0:y1, x0:x1]
-
-
-def _project_for_z(vol, mode):
-    if mode == "yz":
-        return vol.max(axis=2)
-    if mode == "xz":
-        return vol.max(axis=1)
-    if mode == "z_profile_1d":
-        return vol.max(axis=(1, 2))
-    raise ValueError(f"Unknown projection_mode: {mode}")
-
-
-def _update_roi_bounds(vol, roi):
-    y0, y1, x0, x1 = [int(v) for v in roi]
-    h, w = max(1, y1 - y0), max(1, x1 - x0)
-    cy, cx = np.unravel_index(np.argmax(vol.max(axis=0)), vol.shape[1:])
-    ny0, nx0 = int(round(cy - h / 2)), int(round(cx - w / 2))
-    return (ny0, ny0 + h, nx0, nx0 + w)
-
-
-def compute_z_shifts_for_tif(tif_path, ch_idx=0, projection_mode="yz", use_roi=False, roi=None, static_roi=True,
-                             roi_update_interval=10, mode="frame_to_frame", segments=None, upsample_factor=10):
-    """Per-timepoint (dz, dy, dx) shifts from one channel of an OME-TIFF."""
-    stack = TiffStack(tif_path)
-    try:
-        T = stack.T
-        shifts = [[0.0, 0.0, 0.0] for _ in range(T)]
-        state = {"roi": roi}
-
-        def proj(t, ref_t):
-            vol = stack.read_channel(t, ch_idx)
-            if use_roi and state["roi"] is not None:
-                if not static_roi and ref_t is not None and roi_update_interval > 0 and (t - ref_t) % roi_update_interval == 0:
-                    state["roi"] = _update_roi_bounds(vol, state["roi"])
-                vol = _clip_roi_zyx(vol, state["roi"])
-            return _project_for_z(vol, projection_mode)
-
-        def estimate(a, b):
-            s = phase_cross_correlation(a, b, upsample_factor=upsample_factor)
-            if projection_mode == "yz":
-                return [float(-s[0]), float(-s[1]), 0.0]
-            if projection_mode == "xz":
-                return [float(-s[0]), 0.0, float(-s[1])]
-            return [float(-s[0]), 0.0, 0.0]
-
-        if mode == "frame_to_frame":
-            for t in range(1, T):
-                shifts[t] = estimate(proj(t - 1, 0), proj(t, 0))
-                progress("Z shifts", t, max(1, T - 1))
-        elif mode == "reference":
-            segments = segments or []
-            total = max(1, sum(max(0, e - s + 1 - (1 if s <= r <= e else 0)) for r, s, e in segments))
-            step = 0
-            for ref_t, start, end in segments:
-                ref = proj(ref_t, ref_t)
-                for t in range(start, end + 1):
-                    if t == ref_t:
-                        shifts[t] = [0.0, 0.0, 0.0]
-                        continue
-                    shifts[t] = estimate(ref, proj(t, ref_t))
-                    step += 1
-                    progress(f"Z shifts (ref={ref_t})", step, total)
-        else:
-            raise ValueError("mode must be 'frame_to_frame' or 'reference'")
-        return shifts
-    finally:
-        stack.close()
-
-
-def save_shifts_csv(filepath, shifts):
-    """Rows t, dz, dy, dx, total_dz, total_dy, total_dx (t from 1, totals rounded to 0.1)."""
-    shifts = np.asarray(shifts, dtype=np.float64)
-    cumulative = np.round(np.cumsum(shifts, axis=0), 1)
-    t_col = np.arange(1, len(shifts) + 1).reshape(-1, 1)
-    rows = np.hstack([t_col, shifts, cumulative])
-    with open(filepath, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["t", "dz", "dy", "dx", "total_dz", "total_dy", "total_dx"])
-        writer.writerows(rows.tolist())
-
-
-def load_total_dz_from_csv(csv_path):
-    with open(csv_path) as f:
-        return [round(float(row["total_dz"])) for row in csv.DictReader(f)]
-
-
-def z_offsets(dz_values, Z):
-    offsets, bottom_pad, new_Z = [], 0, Z
-    for v in dz_values:
-        off = bottom_pad - int(round(v))
-        if off < 0:
-            extra = -off
-            bottom_pad += extra
-            new_Z += extra
-            offsets = [o + extra for o in offsets]
-            off = 0
-        new_Z = max(new_Z, off + Z)
-        offsets.append(off)
-    return offsets, new_Z
-
-
-def apply_z_shifts_to_tif(tif_path, dz_values, out_path=None):
-    """Place each timepoint at its Z offset on a taller stack; writes {stem}_z.ome.tif."""
-    tif_path = Path(tif_path)
-    out_path = Path(out_path) if out_path else tif_path.with_name(f"{stem_without_ome(tif_path)}_z.ome.tif")
-    stack = TiffStack(tif_path)
-    try:
-        T, C, Z, Y, X = stack.shape
-        if len(dz_values) != T:
-            raise ValueError(f"Expected {T} dz values, got {len(dz_values)}")
-        offsets, new_Z = z_offsets(dz_values, Z)
-
-        def frame(t):
-            padded = np.zeros((C, new_Z, Y, X), dtype=stack.dtype)
-            padded[:, offsets[t]:offsets[t] + Z] = stack.read_frame(t)
-            return padded
-
-        def frames():
-            for t, f in enumerate(ordered_map(frame, T, pipeline_width(stack.frame_bytes))):
-                progress("Z apply", t + 1, T)
-                yield f
-
-        save_ome_tiff(out_path, frames(), stack.channel_names, stack.vox, stack.period_s,
-                      shape=(T, C, new_Z, Y, X), dtype=stack.dtype, bigtiff=True)
-        log(f"Saved {out_path.name}")
-        return out_path
-    finally:
-        stack.close()
 
 
 # ── Movies ───────────────────────────────────────────────────────────────────
