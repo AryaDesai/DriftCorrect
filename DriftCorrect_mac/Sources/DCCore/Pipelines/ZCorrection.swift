@@ -15,6 +15,9 @@ public struct ZCorrectionOptions: Sendable {
     public var deadBand = 0.15
     /// Leave out timepoints whose movement from the timepoint before them exceeds this many slices.
     public var maximumStep: Double?
+    /// Each timepoint is also compared with the one this many timepoints earlier. A slow movement is too small to
+    /// measure between neighbours, and the comparison further back catches it. With 1 only neighbours are compared.
+    public var span = 5
 
     public init() {}
 
@@ -26,24 +29,42 @@ public struct ZCorrectionOptions: Sendable {
 /// Follows one embryo through time. The descriptor of each timepoint is added in the order of time.
 final class ZTracker {
     let options: ZCorrectionOptions
-    private var previous: ZDescriptor?
+    /// The last few timepoints, each with the xy step that moves it onto the timepoint before it.
+    private var recent: [(descriptor: ZDescriptor, step: Rigid)] = []
     private(set) var steps: [ZStep] = []
+    private var edges: [(i: Int, j: Int, d: Double)] = []
 
     init(options: ZCorrectionOptions) { self.options = options }
 
-    /// Compare the timepoint with the previous one and store the result.
+    /// Compare the timepoint with the previous one and store the result. `step` is the xy transform that moves
+    /// this timepoint onto the previous one. `describe` returns the descriptor of this timepoint after it is moved
+    /// in xy by the transform it is given. The timepoint is also compared with the one `span` timepoints earlier,
+    /// where a slow movement is large enough to measure.
     @discardableResult
-    func add(_ d: ZDescriptor) -> ZStep {
-        let step = previous.map { ZDrift.match($0, d) } ?? ZStep()
-        steps.append(step)
-        previous = d
-        return step
+    func add(step: Rigid = .identity, describe: (Rigid) -> ZDescriptor) -> ZStep {
+        let t = steps.count
+        let s = recent.last.map { ZDrift.match($0.descriptor, describe(step)) } ?? ZStep()
+        steps.append(s)
+        if t > 0 { edges.append((t - 1, t, s.dz)) }
+        let span = options.span
+        if span > 1 && recent.count >= span {
+            // Join the xy steps of the timepoints in between, so that this timepoint lands on the earlier one.
+            var joined = step
+            for k in stride(from: recent.count - 1, through: recent.count - span + 1, by: -1) { joined = recent[k].step.after(joined) }
+            let far = ZDrift.match(recent[recent.count - span].descriptor, describe(joined))
+            // Use the comparison only when it and every step it spans matched well.
+            if far.flag.isEmpty && steps[(t - span + 1)...t].allSatisfy({ $0.flag.isEmpty }) { edges.append((t - span, t, far.dz)) }
+        }
+        // Keep this timepoint in its own frame, where later timepoints are moved onto it.
+        recent.append((describe(.identity), step))
+        if recent.count > max(1, span) { recent.removeFirst() }
+        return s
     }
 
     /// Return the shift of every timepoint in whole slices.
     func plan(pad: Bool) -> ZPlan {
-        ZDrift.plan(steps: steps.map { $0.dz }, reference: options.referenceTimepoint, deadBand: options.deadBand, pad: pad,
-                    maximumStep: options.maximumStep)
+        ZDrift.plan(steps: steps.map { $0.dz }, positions: ZDrift.positions(count: steps.count, edges: edges),
+                    reference: options.referenceTimepoint, deadBand: options.deadBand, pad: pad, maximumStep: options.maximumStep)
     }
 }
 
@@ -113,8 +134,6 @@ enum ZPass {
             throw DCError("Maximum shift must be a positive number of slices")
         }
         let meta = src.metadata(position: p)
-        var box: ZBox?
-        if case .box(let x, let y, let w, let h) = options.region { box = ZBox(x: x, y: y, width: w, height: h) }
         if options.region == .embryoMask && (thresholds == nil || backend == nil) {
             throw DCError("Following the embryo mask needs a threshold YAML file. Give one, or follow the whole frame or a box.")
         }
@@ -127,11 +146,12 @@ enum ZPass {
             if options.region == .embryoMask, let cfg = thresholds, let b = backend {
                 mask = try Detection.computeShift(frame: frame, params: try cfg.params(forTimepoint: t), backend: b).mask
             }
-            let d = ZDrift.describe(frame: frame, channel: channel, mask: mask, box: box)
+            let region = XYMatch.region(options.region, mask: mask, toFirst: .identity, width: frame.x, height: frame.y)
+            let d = ZDrift.describe(frame: frame, channel: channel, region: region)
             cache?.put(p * T + t, frame)
             return d
         }, consume: { t, d in
-            let s = tracker.add(d)
+            let s = tracker.add { _ in d }
             ctx.log(String(format: "  t%-4d ", t) + ZDrift.line(s))
             ctx.progress("Measuring z drift", t + 1, T)
         })

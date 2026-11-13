@@ -8,6 +8,14 @@ public struct XYMatchOptions: Sendable {
     public var channelIndex: Int?
     public var channelName: String?
     public var region: FollowRegion = .wholeFrame
+    /// Hold the body in place with the embryo mask, as `Anchor` describes. Without it the frame can slowly travel
+    /// when the cells move through the body.
+    public var holdInPlace = true
+    /// The number of timepoints over which the position and direction of the body are averaged.
+    public var smoothing = 10.0
+    /// The largest turn between two neighbouring timepoints that the matching looks for, in degrees. With 0 the
+    /// matching only shifts.
+    public var maximumAngle = 3.0
     public init() {}
 }
 
@@ -30,7 +38,8 @@ public struct XYFrame: @unchecked Sendable {
 /// every offset the mismatch is the sum of the absolute differences divided by the sum of both images, over the
 /// pixels that both hold inside the region. The offset with the smallest mismatch is the movement between the two.
 /// The search starts on a coarse copy across half the frame in each direction, so that a large jump is found, and
-/// then refines the result on finer copies. Adding up the movements gives the shift of every timepoint.
+/// then refines the result on finer copies. Candidate angles are tried in the same way, by turning the later image
+/// before it is compared. `Anchor` turns the movements of all timepoints into their place in the output.
 public enum XYMatch {
     /// The coarse copy is binned until its longer side is at most this many pixels, which keeps the full search fast.
     static let coarseSide = 128
@@ -125,48 +134,123 @@ public enum XYMatch {
         return diff / Double(2 * n)
     }
 
-    /// Return how far `b`, the later timepoint, must be moved in whole pixels to lie on `a`, the earlier one, and the
-    /// mismatch at that offset. `region` is in pixels of `a` at full resolution. Without it the whole frame is used.
-    public static func match(_ a: XYFrame, _ b: XYFrame, region: [Bool]? = nil) -> (dy: Int, dx: Int, cost: Double) {
-        var best = (dy: 0, dx: 0, cost: Double.infinity)
-        var previousBin = 0
-        for (la, lb) in zip(a.levels, b.levels) {
-            let r = binned(region ?? [Bool](repeating: true, count: a.width * a.height), w: a.width, h: a.height, by: la.bin)
-            var count = 0
-            for i in 0..<r.count where r[i] && la.valid[i] { count += 1 }
-            // The first level searches half the frame in each direction. Each later level searches around the
-            // result of the level before, far enough to cover its rounding.
-            let cy: Int, cx: Int, ry: Int, rx: Int
-            if previousBin == 0 {
-                cy = 0; cx = 0; ry = la.h / 2; rx = la.w / 2
-            } else {
-                cy = best.dy * previousBin / la.bin; cx = best.dx * previousBin / la.bin
-                ry = previousBin / la.bin / 2 + 1; rx = ry
-            }
-            let rows = Array((cy - ry)...(cy + ry))
-            var rowBest = [(dy: Int, dx: Int, cost: Double)](repeating: (0, 0, .infinity), count: rows.count)
-            rowBest.withUnsafeMutableBufferPointer { out in
-                Parallel.forEach(rows.count) { k in
-                    var m = (dy: rows[k], dx: 0, cost: Double.infinity)
-                    for dx in (cx - rx)...(cx + rx) {
-                        let c = cost(la, lb, region: r, regionCount: count, dy: rows[k], dx: dx)
-                        if c < m.cost { m = (rows[k], dx, c) }
+    /// Turn a level by `degrees` about the centre of the frame. A pixel is valid when the four pixels it is
+    /// interpolated from are valid.
+    static func rotated(_ l: XYFrame.Level, degrees: Double, frameWidth: Int, frameHeight: Int) -> XYFrame.Level {
+        if degrees == 0 { return l }
+        // The centre of the frame in pixels of this level.
+        let bin = Double(l.bin)
+        let cx = (Double(frameWidth - 1) / 2 - (bin - 1) / 2) / bin, cy = (Double(frameHeight - 1) / 2 - (bin - 1) / 2) / bin
+        // Each output pixel reads the source at the position that the opposite rotation gives.
+        let back = Rigid.rotation(degrees: -degrees, aboutX: cx, y: cy)
+        let w = l.w, h = l.h
+        var pixels = [Float](repeating: 0, count: w * h), valid = [Bool](repeating: false, count: w * h)
+        pixels.withUnsafeMutableBufferPointer { out in
+            valid.withUnsafeMutableBufferPointer { ok in
+                Parallel.forEach(h) { y in
+                    for x in 0..<w {
+                        let s = back.apply(x: Double(x), y: Double(y))
+                        let x0 = Int(s.x.rounded(.down)), y0 = Int(s.y.rounded(.down))
+                        if x0 < 0 || y0 < 0 || x0 + 1 >= w || y0 + 1 >= h { continue }
+                        let i = y0 * w + x0
+                        if !(l.valid[i] && l.valid[i + 1] && l.valid[i + w] && l.valid[i + w + 1]) { continue }
+                        let fx = Float(s.x - Double(x0)), fy = Float(s.y - Double(y0))
+                        out[y * w + x] = (l.pixels[i] * (1 - fx) + l.pixels[i + 1] * fx) * (1 - fy)
+                            + (l.pixels[i + w] * (1 - fx) + l.pixels[i + w + 1] * fx) * fy
+                        ok[y * w + x] = true
                     }
-                    out[k] = m
                 }
             }
-            best = (0, 0, .infinity)
-            for m in rowBest where m.cost < best.cost { best = m }
-            if !best.cost.isFinite { return (0, 0, .nan) }
-            previousBin = la.bin
         }
+        return XYFrame.Level(bin: l.bin, w: w, h: h, pixels: pixels, valid: valid)
+    }
+
+    /// Try every whole offset within (ry, rx) of (cy, cx) and return the one with the smallest mismatch.
+    static func search(_ la: XYFrame.Level, _ lb: XYFrame.Level, region: [Bool], regionCount: Int,
+                       cy: Int, cx: Int, ry: Int, rx: Int) -> (dy: Int, dx: Int, cost: Double) {
+        let rows = Array((cy - ry)...(cy + ry))
+        var rowBest = [(dy: Int, dx: Int, cost: Double)](repeating: (0, 0, .infinity), count: rows.count)
+        rowBest.withUnsafeMutableBufferPointer { out in
+            Parallel.forEach(rows.count) { k in
+                var m = (dy: rows[k], dx: 0, cost: Double.infinity)
+                for dx in (cx - rx)...(cx + rx) {
+                    let c = cost(la, lb, region: region, regionCount: regionCount, dy: rows[k], dx: dx)
+                    if c < m.cost { m = (rows[k], dx, c) }
+                }
+                out[k] = m
+            }
+        }
+        var best = (dy: 0, dx: 0, cost: Double.infinity)
+        for m in rowBest where m.cost < best.cost { best = m }
         return best
     }
 
-    /// The pixels of the earlier timepoint that the matching compares. `mask` is the embryo mask of that timepoint,
-    /// and `position` is its shift so far, which moves the box from the first timepoint onto it.
-    public static func region(_ follow: FollowRegion, mask: Mask2D?, position: (dy: Double, dx: Double),
-                              width w: Int, height h: Int) -> [Bool]? {
+    /// The step between the candidate angles on the coarsest copy, in degrees. Each finer copy halves it.
+    static let angleStep = 0.5
+    /// A turn is accepted only when it lowers the mismatch by at least this share compared with no turn. A turned
+    /// image is interpolated, which smooths it slightly and can lower the mismatch without a real turn.
+    static let turnMargin = 0.02
+
+    /// Return the transform that moves `b`, the later timepoint, onto `a`, the earlier one, and the mismatch there.
+    /// The transform turns `b` about the centre of the frame and then shifts it by whole pixels. `region` is in
+    /// pixels of `a` at full resolution, and without it the whole frame is used. Angles up to `maximumAngle` degrees
+    /// in either direction are tried. With 0 the match only shifts.
+    public static func match(_ a: XYFrame, _ b: XYFrame, region: [Bool]? = nil, maximumAngle: Double = 0) -> (step: Rigid, cost: Double) {
+        let W = a.width, H = a.height
+        let whole = region ?? [Bool](repeating: true, count: W * H)
+        var best = (dy: 0, dx: 0, cost: Double.infinity)
+        var angle = 0.0, step = angleStep
+        var previousBin = 0
+        for (la, lb) in zip(a.levels, b.levels) {
+            let r = binned(whole, w: W, h: H, by: la.bin)
+            var count = 0
+            for i in 0..<r.count where r[i] && la.valid[i] { count += 1 }
+            func turned(_ degrees: Double) -> XYFrame.Level { rotated(lb, degrees: degrees, frameWidth: W, frameHeight: H) }
+            if previousBin == 0 {
+                // The coarsest copy first searches half the frame in each direction without turning, so that a
+                // large jump is found. It then tries every candidate angle close to that offset.
+                best = search(la, lb, region: r, regionCount: count, cy: 0, cx: 0, ry: la.h / 2, rx: la.w / 2)
+                if !best.cost.isFinite { return (.identity, .nan) }
+                let straight = best
+                var turn = (dy: 0, dx: 0, cost: Double.infinity), turnAngle = 0.0
+                var candidate = -maximumAngle
+                while maximumAngle > 0 && candidate <= maximumAngle + 1e-9 {
+                    if abs(candidate) > 1e-9 {
+                        let m = search(la, turned(candidate), region: r, regionCount: count, cy: straight.dy, cx: straight.dx, ry: 2, rx: 2)
+                        if m.cost < turn.cost { turn = m; turnAngle = candidate }
+                    }
+                    candidate += step
+                }
+                if turn.cost < straight.cost * (1 - turnMargin) { best = turn; angle = turnAngle }
+            } else {
+                // Each finer copy searches around the result of the copy before it, far enough to cover its
+                // rounding. It tries no turn, and the angle found so far with half a step to either side.
+                let scale = previousBin / la.bin
+                let cy = best.dy * scale, cx = best.dx * scale, radius = scale / 2 + 1
+                step /= 2
+                let straight = search(la, lb, region: r, regionCount: count, cy: cy, cx: cx, ry: radius, rx: radius)
+                var turn = (dy: 0, dx: 0, cost: Double.infinity), turnAngle = 0.0
+                for candidate in maximumAngle > 0 ? [angle, angle - step, angle + step] : [] where abs(candidate) > 1e-9 {
+                    let m = search(la, turned(candidate), region: r, regionCount: count, cy: cy, cx: cx, ry: radius, rx: radius)
+                    if m.cost < turn.cost { turn = m; turnAngle = candidate }
+                }
+                if turn.cost < straight.cost * (1 - turnMargin) {
+                    best = turn; angle = turnAngle
+                } else if straight.cost.isFinite {
+                    best = straight; angle = 0
+                } else {
+                    return (.identity, .nan)
+                }
+            }
+            previousBin = la.bin
+        }
+        let turn = Rigid.rotation(degrees: angle, aboutX: Double(W - 1) / 2, y: Double(H - 1) / 2)
+        return (Rigid.shift(dx: Double(best.dx), dy: Double(best.dy)).after(turn), best.cost)
+    }
+
+    /// Return the pixels of one timepoint that the matching compares, or nil for the whole frame. `mask` is the
+    /// embryo mask of that timepoint. `toFirst` moves that timepoint onto the first one, where the box was drawn.
+    public static func region(_ follow: FollowRegion, mask: Mask2D?, toFirst: Rigid, width w: Int, height h: Int) -> [Bool]? {
         switch follow {
         case .wholeFrame:
             return nil
@@ -175,11 +259,14 @@ public enum XYMatch {
             guard let m = mask, m.width == w, m.height == h else { return nil }
             return ZDrift.dilate(m.bits, w: w, h: h, radius: 12)
         case .box(let bx, let by, let bw, let bh):
-            // Pixel (y, x) of the first timepoint is at (y - dy, x - dx) of this timepoint.
-            let oy = Int(position.dy.rounded()), ox = Int(position.dx.rounded())
+            // A pixel is in the region when its position on the first timepoint lies inside the box.
             var out = [Bool](repeating: false, count: w * h)
-            let y0 = max(0, by - oy), y1 = min(h, by + bh - oy), x0 = max(0, bx - ox), x1 = min(w, bx + bw - ox)
-            if y0 < y1 && x0 < x1 { for y in y0..<y1 { for x in x0..<x1 { out[y * w + x] = true } } }
+            for y in 0..<h {
+                for x in 0..<w {
+                    let p = toFirst.apply(x: Double(x), y: Double(y))
+                    out[y * w + x] = p.x >= Double(bx) && p.x < Double(bx + bw) && p.y >= Double(by) && p.y < Double(by + bh)
+                }
+            }
             return out
         }
     }

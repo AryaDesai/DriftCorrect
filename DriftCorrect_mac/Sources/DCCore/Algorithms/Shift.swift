@@ -25,6 +25,20 @@ public struct Padding: Equatable, Sendable {
         return Padding(top: up(-(dys.min() ?? 0)), bottom: up(dys.max() ?? 0),
                        left: up(-(dxs.min() ?? 0)), right: up(dxs.max() ?? 0))
     }
+
+    /// Return the padding that keeps every pixel on the canvas when frames of the given size are moved by `transforms`.
+    public static func covering(transforms: [Rigid], width: Int, height: Int) -> Padding {
+        func up(_ v: Double) -> Int { Int(max(0, v).rounded(.up)) }
+        let w = Double(width - 1), h = Double(height - 1)
+        var minX = 0.0, maxX = w, minY = 0.0, maxY = h
+        for m in transforms {
+            for corner in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
+                let q = m.apply(x: corner.0, y: corner.1)
+                minX = min(minX, q.x); maxX = max(maxX, q.x); minY = min(minY, q.y); maxY = max(maxY, q.y)
+            }
+        }
+        return Padding(top: up(-minY), bottom: up(maxY - h), left: up(-minX), right: up(maxX - w))
+    }
 }
 
 public enum Shift {
@@ -83,6 +97,47 @@ public enum Shift {
                         dst[y * W + x] = toUInt16(Float(acc))
                     }
                 }
+            }
+        }
+        return out
+    }
+
+    /// Move every plane of `frame` by `transform` onto a canvas of the size of `frame` plus `pad`, and convert the
+    /// result to uint16. `transform` is in pixels of the frame. Values between pixels are interpolated from the four
+    /// nearest pixels, and a pixel outside the frame counts as 0.
+    public static func warp(_ frame: Volume, pad: Padding, transform: Rigid) -> Volume {
+        let H = frame.y + pad.top + pad.bottom, W = frame.x + pad.left + pad.right
+        let X = frame.x, Y = frame.y
+        let out = Volume(c: frame.c, z: frame.z, y: H, x: W, type: .uint16)
+        // Each output pixel reads the source at the position that the opposite transform gives. The positions are
+        // the same for every plane, so they are worked out once.
+        let back = Rigid.shift(dx: Double(pad.left), dy: Double(pad.top)).after(transform).inverse
+        var x0s = [Int32](repeating: Int32.min, count: W * H), y0s = [Int32](repeating: 0, count: W * H)
+        var fxs = [Float](repeating: 0, count: W * H), fys = [Float](repeating: 0, count: W * H)
+        x0s.withUnsafeMutableBufferPointer { px in y0s.withUnsafeMutableBufferPointer { py in
+            fxs.withUnsafeMutableBufferPointer { pfx in fys.withUnsafeMutableBufferPointer { pfy in
+                Parallel.forEach(H) { y in
+                    for x in 0..<W {
+                        let s = back.apply(x: Double(x), y: Double(y))
+                        if s.x <= -1 || s.y <= -1 || s.x >= Double(X) || s.y >= Double(Y) { continue }
+                        let x0 = Int(s.x.rounded(.down)), y0 = Int(s.y.rounded(.down)), k = y * W + x
+                        px[k] = Int32(x0); py[k] = Int32(y0)
+                        pfx[k] = Float(s.x - Double(x0)); pfy[k] = Float(s.y - Double(y0))
+                    }
+                }
+            } }
+        } }
+        Parallel.forEach(frame.planeCount) { plane in
+            let dst = out.planePointer(plane).assumingMemoryBound(to: UInt16.self)
+            @inline(__always) func src(_ yy: Int, _ xx: Int) -> Float {
+                (yy < 0 || yy >= Y || xx < 0 || xx >= X) ? 0 : frame.sample(plane: plane, index: yy * X + xx)
+            }
+            for k in 0..<(W * H) {
+                if x0s[k] == Int32.min { dst[k] = 0; continue }
+                let x0 = Int(x0s[k]), y0 = Int(y0s[k]), fx = fxs[k], fy = fys[k]
+                let v = (src(y0, x0) * (1 - fx) + src(y0, x0 + 1) * fx) * (1 - fy)
+                    + (src(y0 + 1, x0) * (1 - fx) + src(y0 + 1, x0 + 1) * fx) * fy
+                dst[k] = toUInt16(v.rounded())
             }
         }
         return out

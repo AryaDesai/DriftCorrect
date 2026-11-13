@@ -96,6 +96,10 @@ final class MaskModel: ObservableObject {
     @Published private(set) var source: ProjectionSource?
     @Published private(set) var channelNames: [String] = []
     @Published var status = ""
+    /// The YAML file that the last save wrote. The Alignment window watches it to pick up a new mask.
+    @Published private(set) var lastSaved: URL?
+    /// When set, the next file that loads starts with a threshold estimated from the image, on this channel.
+    var suggestOnChannel: Int?
 
     // Controls
     @Published var channelIndex = 0 { didSet { if oldValue != channelIndex { update() } } }
@@ -170,6 +174,36 @@ final class MaskModel: ObservableObject {
         t = 0
         status = "Loaded: T=\(src.t), P=\(src.p), C=\(src.c), Y=\(src.y), X=\(src.x)"
         update()
+        if let c = suggestOnChannel {
+            suggestOnChannel = nil
+            suggest(channel: min(max(0, c), src.c - 1), source: src)
+        }
+    }
+
+    /// Open a movie from the Alignment window and start with a suggested threshold on `channel`.
+    func open(path newPath: String, channel: Int) {
+        suggestOnChannel = channel
+        path = newPath
+        load()
+    }
+
+    /// Set the channel and estimate a starting percentile from the first timepoint. The estimate is the share of
+    /// pixels below the Otsu threshold of the blurred image. The user adjusts it or accepts it.
+    private func suggest(channel: Int, source src: ProjectionSource) {
+        channelIndex = channel
+        let sigma = Double(self.sigma)
+        Task.detached(priority: .userInitiated) {
+            guard let image = try? src.image(t: 0, p: 0, c: channel),
+                  let smoothed = try? Services.backend.gaussian(image, sigma: sigma),
+                  let threshold = Otsu.threshold(ofValues: smoothed.pixels), !smoothed.pixels.isEmpty else { return }
+            let below = smoothed.pixels.reduce(0) { $0 + ($1 <= threshold ? 1 : 0) }
+            let percentile = 100 * Double(below) / Double(smoothed.pixels.count)
+            await MainActor.run {
+                self.method = .percentile
+                self.percentileSteps = min(199, max(20, Int((percentile * 2).rounded())))
+                self.status += "  Suggested percentile \(PyFormat.g(self.percentile)). Adjust it and save."
+            }
+        }
     }
 
     func previousEmbryo() { guard P > 1 else { return }; embryo = (embryo - 1 + P) % P; update() }
@@ -286,7 +320,7 @@ final class MaskModel: ObservableObject {
             do {
                 let url = try MaskSave.save(source: src, embryo: embryo, t: tp, params: params, perTimepoint: perT,
                                             backend: Services.backend)
-                await MainActor.run { self.status = "Saved → \(url.lastPathComponent)" }
+                await MainActor.run { self.status = "Saved → \(url.lastPathComponent)"; self.lastSaved = url }
             } catch {
                 await MainActor.run { showAlert("Save failed", "\(error)") }
             }

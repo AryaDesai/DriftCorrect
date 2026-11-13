@@ -14,11 +14,10 @@ import sys
 GUI_MODES = ("convert-gui", "mask-gui", "align-gui")
 WORKER_MODES = ("convert-worker", "align-worker")
 
+# The Mask window is not in the launcher. The Alignment window opens it when a run needs the embryo mask.
 TOOLS = (
     ("Convert ND2 to TIFF", "convert-gui"),
-    ("Mask embryo", "mask-gui"),
     ("Align movie", "align-gui"),
-
 )
 
 
@@ -121,7 +120,7 @@ def main():
     else:
         options = parser.parse_args()
         remaining = []
-    if remaining and options.tool not in WORKER_MODES:
+    if remaining and options.tool not in WORKER_MODES + ("mask-gui",):
         parser.error("unrecognized arguments: " + " ".join(remaining))
     sys.argv = [sys.argv[0], *remaining]
     code = entry_point(options.tool)()

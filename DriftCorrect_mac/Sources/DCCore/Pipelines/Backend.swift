@@ -20,6 +20,16 @@ public protocol ComputeBackend: AnyObject {
     /// `scipy.ndimage.shift(order=1, mode="constant")` or a shift by whole pixels, followed by
     /// `clip(0, 65535).astype(np.uint16)`.
     func shift(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) throws -> Volume
+
+    /// Move every plane by a rotation and a shift onto the canvas of the frame plus `pad`, as `Shift.warp` does.
+    func warp(_ frame: Volume, pad: Padding, transform: Rigid) throws -> Volume
+}
+
+public extension ComputeBackend {
+    /// The move runs on the CPU unless a backend provides its own.
+    func warp(_ frame: Volume, pad: Padding, transform: Rigid) throws -> Volume {
+        Shift.warp(frame, pad: pad, transform: transform)
+    }
 }
 
 public final class CPUBackend: ComputeBackend {

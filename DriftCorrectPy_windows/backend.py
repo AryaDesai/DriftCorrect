@@ -18,7 +18,7 @@ import os
 import threading
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, shift as nd_shift
+from scipy.ndimage import affine_transform, gaussian_filter, shift as nd_shift
 
 SHIFT_MODES = ("subpixel", "integer")
 
@@ -75,6 +75,36 @@ class CPUBackend:
             return _integer_shift(np, f, dy, dx).clip(0, 65535).astype(np.uint16)
         out = nd_shift(f, (0, 0, float(dy), float(dx)), order=1, mode="constant", cval=0)
         return out.clip(0, 65535).astype(np.uint16)
+
+    def warp(self, frame, pad, transform):
+        """Move all (C, Z) planes by a rotation and a shift onto the frame padded by pad=(top, bottom, left, right).
+
+        Values between pixels are interpolated from the four nearest pixels, and a pixel outside the frame counts
+        as 0. Returns uint16 (C, Z, Y + top + bottom, X + left + right).
+        """
+        top, bottom, left, right = pad
+        C, Z, Y, X = frame.shape
+        shape = (Y + top + bottom, X + left + right)
+        matrix, offset = _warp_arguments(pad, transform)
+        out = np.empty((C, Z) + shape, dtype=np.uint16)
+        for c in range(C):
+            for z in range(Z):
+                plane = affine_transform(np.asarray(frame[c, z], dtype=np.float32), matrix, offset=offset, output_shape=shape,
+                                         order=1, mode="grid-constant", cval=0)
+                out[c, z] = np.rint(plane).clip(0, 65535).astype(np.uint16)
+        return out
+
+
+def _warp_arguments(pad, transform):
+    """Return the matrix and offset that ndimage needs to move a plane by `transform` onto the padded canvas.
+
+    `transform` is a 3 by 3 matrix in (x, y) pixels of the frame. Each output pixel reads the source at the
+    position that the opposite transform gives, and ndimage works in (row, column) order.
+    """
+    top, _, left, _ = pad
+    placed = np.array([[1, 0, left], [0, 1, top], [0, 0, 1.0]]) @ np.asarray(transform, dtype=float)
+    back = np.linalg.inv(placed)
+    return [[back[1, 1], back[1, 0]], [back[0, 1], back[0, 0]]], (back[1, 2], back[0, 2])
 
 
 def _integer_shift(xp, f, dy, dx):
@@ -239,6 +269,28 @@ class CudaBackend:
                 grid = ((W + 31) // 32, (H + 7) // 8, C * Z)
                 self._shift(grid, block, (f, out, *rows, *cols, np.int32(W), np.int32(H), np.int32(X), np.int32(Y),
                                           np.int32(top), np.int32(left), np.int32(C * Z)))
+            result = cp.asnumpy(out, stream=stream)
+            stream.synchronize()
+        return result
+
+    def warp(self, frame, pad, transform):
+        """Move all planes by a rotation and a shift on the GPU. The result is the same as on the CPU up to
+        float32 rounding."""
+        cp = self.cp
+        from cupyx.scipy.ndimage import affine_transform as gpu_affine_transform
+        top, bottom, left, right = pad
+        C, Z, Y, X = frame.shape
+        shape = (Y + top + bottom, X + left + right)
+        matrix, offset = _warp_arguments(pad, transform)
+        with self._stream() as stream:
+            f = cp.asarray(frame).astype(cp.float32, copy=False)
+            out = cp.empty((C, Z) + shape, dtype=cp.uint16)
+            m = cp.asarray(matrix)
+            for c in range(C):
+                for z in range(Z):
+                    plane = gpu_affine_transform(f[c, z], m, offset=offset, output_shape=shape, order=1,
+                                                 mode="grid-constant", cval=0)
+                    out[c, z] = cp.rint(plane).clip(0, 65535).astype(cp.uint16)
             result = cp.asnumpy(out, stream=stream)
             stream.synchronize()
         return result

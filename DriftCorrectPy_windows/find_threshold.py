@@ -13,6 +13,7 @@ Usage:
     python find_threshold.py
 """
 
+import argparse
 import datetime
 import sys
 import threading
@@ -35,6 +36,7 @@ from backend import get_backend
 from common_gui import Relay, run_in_background
 from multi_otsu import MAX_OTSU_LEVELS, multiotsu_thresholds_and_classes
 from useful_functions import (
+    otsu_threshold_of,
     LEVEL_COLORS, FrameSource, find_largest_mask_xy, physical_memory, render_composite, roi_otsu_threshold,
     stem_without_ome,
 )
@@ -128,8 +130,9 @@ class EmbryoLabel(QLabel):
 
 
 class ThresholdApp(QWidget):
-    def __init__(self):
+    def __init__(self, initial_file=None, initial_channel=0):
         super().__init__()
+        self.initial_file, self.initial_channel = initial_file, initial_channel
         self.setWindowTitle("Find threshold for masking PSM")
         self.backend = None        # set in the background by _backend_ready
         self.data = None
@@ -165,6 +168,29 @@ class ThresholdApp(QWidget):
         self.backend_label.setText(f"Compute: {backend.name}")
         self.browse_btn.setEnabled(True)
         self.load_btn.setEnabled(True)
+        if self.initial_file:
+            # The Alignment window opened this window on a movie.
+            self.path_entry.setText(self.initial_file)
+            self._load_file()
+            if self.data is not None:
+                self._suggest(self.initial_channel)
+
+    def _suggest(self, channel):
+        """Choose `channel` and set a starting percentile estimated from the first timepoint. The estimate is the
+        share of pixels below the Otsu threshold of the blurred image. The user adjusts it or accepts it."""
+        channel = min(max(0, channel), self.C - 1)
+        self.channel_combo.setCurrentIndex(channel)
+        try:
+            smoothed = self.backend.gaussian(self.data.get(0, 0)[channel], self.sigma_slider.value())
+        except Exception:
+            return
+        threshold = otsu_threshold_of(smoothed)
+        if threshold is None:
+            return
+        percentile = 100.0 * float((smoothed <= threshold).mean())
+        self.pct_slider.setValue(int(np.clip(round(percentile * 2), 20, 199)))
+        self.status_label.setText(self.status_label.text() + f"  Suggested percentile {self.pct_slider.value() / 2:g}. Adjust it and save.")
+        self._update()
 
     # ── UI construction ──────────────────────────────────────────────────
 
@@ -718,9 +744,14 @@ class ThresholdApp(QWidget):
 
 
 def main():
-    app = QApplication(sys.argv)
+    # The Alignment window passes the movie and the channel to start on.
+    parser = argparse.ArgumentParser(description="Find the threshold for the embryo mask.")
+    parser.add_argument("--file", help="Open this ND2 or TIFF file and suggest a threshold.")
+    parser.add_argument("--channel", type=int, default=0, help="The channel to start on (default: 0).")
+    options, remaining = parser.parse_known_args()
+    app = QApplication([sys.argv[0], *remaining])
     app.setStyle("Fusion")
-    window = ThresholdApp()
+    window = ThresholdApp(initial_file=options.file, initial_channel=options.channel)
     window.show()
     return app.exec()
 

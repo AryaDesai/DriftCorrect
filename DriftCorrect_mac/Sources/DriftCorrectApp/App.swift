@@ -7,7 +7,6 @@ struct DriftCorrectApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var convertJob = JobRunner()
     @StateObject private var alignJob = JobRunner()
-    @StateObject private var zJob = JobRunner()
     @StateObject private var mask = MaskModel()
 
     var body: some Scene {
@@ -22,11 +21,8 @@ struct DriftCorrectApp: App {
         Window("Find threshold for masking PSM", id: "mask") {
             MaskView(model: mask)
         }
-        Window("XY Centroid Alignment", id: "align") {
-            AlignView(job: alignJob)
-        }
-        Window("Z Drift Correction", id: "zcorrect") {
-            ZCorrectView(job: zJob)
+        Window("Alignment", id: "align") {
+            AlignView(job: alignJob, mask: mask)
         }
     }
 }
@@ -58,9 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct LauncherView: View {
     struct Tool: Identifiable { let title: String; let id: String }
-    static let tools = [Tool(title: "Convert ND2 to TIFF", id: "convert"), Tool(title: "Mask embryo", id: "mask"),
-                        Tool(title: "Align movie", id: "align"),
-                        Tool(title: "Correct z drift", id: "zcorrect")]
+    static let tools = [Tool(title: "Convert ND2 to TIFF", id: "convert"), Tool(title: "Align movie", id: "align")]
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {

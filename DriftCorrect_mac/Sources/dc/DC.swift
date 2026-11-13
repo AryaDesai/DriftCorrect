@@ -92,8 +92,16 @@ struct ZOptionGroup: ParsableArguments {
             help: "Leave out timepoints whose movement from the timepoint before them exceeds this many slices.")
     var zDropAbove: Double?
 
+    @Option(name: [.customLong("z-span"), .customLong("z_span")],
+            help: "Each timepoint is also compared with the one this many timepoints earlier, which catches slow movement (default 5). With 1 only neighbours are compared.")
+    var zSpan: Int?
+
     func make() throws -> ZCorrectionOptions {
         var o = ZCorrectionOptions()
+        if let v = zSpan {
+            guard v >= 1 else { throw ValidationError("--z-span must be 1 or more") }
+            o.span = v
+        }
         (o.channelIndex, o.channelName) = parseChannel(zChannel)
         o.region = try parseRegion(zRegion, box: zBox, prefix: "z", default: .wholeFrame)
         if let limit = zDropAbove, !limit.isFinite || limit <= 0 {
@@ -122,6 +130,18 @@ struct XYOptionGroup: ParsableArguments {
             help: "A box over cells that should stay still, as x,y,width,height in pixels of the first timepoint.")
     var xyBox: String?
 
+    @Flag(name: [.customLong("xy-no-hold"), .customLong("xy_no_hold")],
+          help: "Do not hold the body in place with the embryo mask. The frame can then slowly travel when the cells move through the body.")
+    var xyNoHold = false
+
+    @Option(name: [.customLong("xy-smoothing"), .customLong("xy_smoothing")],
+            help: "The number of timepoints over which the position and direction of the body are averaged (default 10).")
+    var xySmoothing: Double?
+
+    @Option(name: [.customLong("xy-max-angle"), .customLong("xy_max_angle")],
+            help: "The largest turn between two neighbouring timepoints that image matching looks for, in degrees (default 3). With 0 the matching only shifts.")
+    var xyMaxAngle: Double?
+
     func make() throws -> XYMatchOptions? {
         switch xyMethod.lowercased() {
         case "centroid": return nil
@@ -129,6 +149,15 @@ struct XYOptionGroup: ParsableArguments {
             var o = XYMatchOptions()
             (o.channelIndex, o.channelName) = parseChannel(xyChannel)
             o.region = try parseRegion(xyRegion, box: xyBox, prefix: "xy", default: .wholeFrame)
+            o.holdInPlace = !xyNoHold
+            if let v = xySmoothing {
+                guard v.isFinite, v >= 0 else { throw ValidationError("--xy-smoothing must be 0 or a positive number of timepoints") }
+                o.smoothing = v
+            }
+            if let v = xyMaxAngle {
+                guard v.isFinite, v >= 0 else { throw ValidationError("--xy-max-angle must be 0 or a positive number of degrees") }
+                o.maximumAngle = v
+            }
             return o
         default: throw ValidationError("--xy-method must be centroid or image")
         }

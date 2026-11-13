@@ -3,7 +3,7 @@
 This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `find_threshold.py`,
 `centroid_align_xy.py`, and their GUIs). It contains:
 
-- **DriftCorrect.app**: a SwiftUI app. It has the launcher and four tool windows: Convert ND2 to TIFF, Mask embryo, Align movie, and Correct z drift.
+- **DriftCorrect.app**: a SwiftUI app. The launcher opens two windows, Convert ND2 to TIFF and Align movie. The Mask window opens from the Alignment window when a run needs the embryo mask.
 - **dc**: a command-line tool. `dc convert` and `dc align` accept the same arguments as the Python workers in the general version
 
 ## Requirements
@@ -41,11 +41,24 @@ dc bench                                  # CPU vs Metal timing
 
 Add `--cpu` to `align` to use the CPU reference instead of Metal.
 
+## Alignment window
+
+The Alignment window has three tabs. **XYZ** corrects the movie in xy and then in z. **XY only** and **Z only** run one of the two.
+
+1. Select the movie, which is an OME-TIFF or ND2 file.
+2. Choose the channel whose pattern is followed. A nuclear marker is the best choice.
+3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie with a suggested threshold. Adjust it and save, and the saved YAML file appears in the row. A YAML file saved earlier next to the movie is found automatically.
+4. Run.
+
+With the default settings, XYZ and XY only use the mask to hold the body in place, and Z only does not need it.
+
+**Advanced options** holds the settings that change how the correction works. Each one has an explanation under it.
+
 ## Image matching
 
 Image matching is how z correction measures drift, and it is one of the two ways the Align tool can measure drift in xy. It compares each timepoint with the timepoint before it.
 
-The later image is slid over the earlier one. For every offset, the tool takes the pixels that both images hold inside the region it follows, scales both sides to the same mean so that bleaching does not count, and adds up the absolute differences. That sum divided by the sum of both images is the mismatch, which is 0 for identical images and 1 for images with nothing in common. The offset with the smallest mismatch is the movement between the two timepoints. Adding up the movements gives the shift of every timepoint relative to the first one.
+The later image is slid over the earlier one, and in xy it is also turned by candidate angles. For every offset, the tool takes the pixels that both images hold inside the region it follows, scales both sides to the same mean so that bleaching does not count, and adds up the absolute differences. That sum divided by the sum of both images is the mismatch, which is 0 for identical images and 1 for images with nothing in common. The offset with the smallest mismatch is the movement between the two timepoints. A turn is accepted only when it lowers the mismatch by a clear margin compared with no turn, because a turned image is interpolated and that alone can lower the mismatch slightly.
 
 The region can be the whole frame, the embryo mask, or a box that you draw over cells that should stay still. The embryo mask needs the threshold YAML file from the Mask tool. A box is drawn on the first timepoint before the alignment, and the tool moves it along with the tissue.
 
@@ -53,10 +66,20 @@ A match with a mismatch above 0.27 is marked `[weak match]` in the log. Such a t
 
 ## XY alignment
 
-The **XY method** of the Align tool, or `dc align --xy-method`, chooses how the xy shift is found.
+The **Method** under Advanced options, or `dc align --xy-method`, chooses how the xy movement is found.
 
-- **Mask centroid** (default) moves every timepoint so that the centroid of the embryo mask sits in the centre of the frame. This is what the Python scripts do. The centroid moves whenever the mask changes shape, for example when the tissue grows or when the field of view cuts off a different part of the embryo, and the movie then moves with it.
-- **Image matching** compares each timepoint with the one before it, as the section above describes, on the maximum projection of the **XY channel**. A nuclear marker is the best choice. The search starts on a copy binned until its longer side is at most 128 pixels, across half the frame in each direction, so that the jump after the embryo was centred again is found. It then refines the result on copies binned by 2 and at full resolution. The first timepoint keeps its position, so the movie follows the tissue and the canvas grows by the full distance the tissue travels.
+- **Image matching** compares each timepoint with the one before it, as the section above describes, on the maximum projection of the chosen channel. The search starts on a copy binned until its longer side is at most 128 pixels, across half the frame in each direction, so that the jump after the embryo was centred again is found. It then refines the shift and the angle on copies binned by 2 and at full resolution.
+- **Mask centroid** moves every timepoint so that the centroid of the embryo mask sits in the centre of the frame, without turning. This is what the Python scripts did. The centroid moves whenever the mask changes shape, and the movie then wobbles with it.
+
+### Holding the body in place
+
+Image matching follows the cells. When the cells move through the body, as they do in a growing tail, the sum of the steps slowly carries the frame away from where it started. The output then shows the frame travelling across an empty canvas.
+
+With **Hold the body in place with the embryo mask**, which is on by default, the tool uses the mask to say where the body is. It follows the centroid of the mask and the direction of its long axis, and averages both over nearby timepoints, because the mask is rough at a single timepoint and reliable over many. Each timepoint is then placed so that the averaged centroid sits in the middle of the frame and the long axis keeps the direction it had at the first timepoint. The sudden movement between neighbouring timepoints still comes from the image matching, so jumps and jitter are removed, and the cells are free to move inside the body.
+
+The long axis is used only when the mask is clearly elongated at every timepoint. For a nearly round mask the tool removes sudden turns and leaves slow turning as it is.
+
+The output is written with one move for each timepoint, which is a rotation and a shift with interpolation between pixels.
 
 ## Z correction
 
@@ -64,8 +87,8 @@ The tools can also correct drift along z. The correction keeps the same tissue i
 
 There are two ways to run it.
 
-- The **Correct z drift** window, or `dc correct-z FILE`, corrects one OME-TIFF or ND2 file without aligning it in xy. Use it on a file that is already steady in xy, such as the `{name}_xy.ome.tif` file from an earlier alignment. It writes `{name}_z.ome.tif` next to the input file.
-- The **Correct z drift (after xy)** option of the Align tool, or `dc align --z-correct`, runs the xy alignment and the z correction in one run. The z drift is measured on the frames after they are moved in xy. It writes `{name}_xy_z.ome.tif` in place of `{name}_xy.ome.tif`.
+- The **Z only** tab, or `dc correct-z FILE`, corrects one OME-TIFF or ND2 file without aligning it in xy. Use it on a file that is already steady in xy, such as the `{name}_xy.ome.tif` file from an earlier alignment. It writes `{name}_z.ome.tif` next to the input file.
+- The **XYZ** tab, or `dc align --z-correct`, runs the xy alignment and the z correction in one run. Each timepoint is moved in xy onto the timepoint it is compared with before the z drift is measured. It is also compared with the timepoint five back, where a slow movement is large enough to measure, and the positions are the ones that agree best with both sets of comparisons. It writes `{name}_xy_z.ome.tif` in place of `{name}_xy.ome.tif`.
 
 ### How the drift is measured
 
@@ -79,7 +102,7 @@ The correction moves whole slices and does not interpolate between slices. Where
 
 The shift of a timepoint changes only when the tissue has moved more than 0.65 of a slice from the slice it was last assigned to. Without this margin, tissue that sits halfway between two slices would make the output switch back and forth between them.
 
-The output can be much deeper than the input when the embryo was centred again several times, because each jump adds as many empty slices as the jump is large. When the stack is not enlarged, it keeps its depth and the slices that leave it are dropped. In the Align tool this follows **Enlarge canvas to prevent clipping**. In the Correct z drift window it is the option **Add empty slices so that no slice is lost**.
+The output can be much deeper than the input when the embryo was centred again several times, because each jump adds as many empty slices as the jump is large. When the stack is not enlarged, it keeps its depth and the slices that leave it are dropped. This follows **Enlarge the canvas and the stack so that nothing is cut off** under Advanced options.
 
 ### Settings
 
@@ -89,11 +112,11 @@ The output can be much deeper than the input when the embryo was centred again s
 
 ### Outputs
 
-- The corrected stack is `{name}_z.ome.tif` from the Correct z drift window and `{name}_xy_z.ome.tif` from the Align tool.
+- The corrected stack is `{name}_z.ome.tif` from the Z only tab and `{name}_xy_z.ome.tif` from the XYZ tab.
 - A CSV file with the same name and the ending `_shifts.csv` has one row for each timepoint. A row holds the timepoint in the input and in the output, the stage z position, the measured movement, the mismatch, the position of the tissue, the number of whole slices the timepoint was moved, and a flag when the timepoint needs a look or was left out.
 - When timepoints are left out, the output keeps their original acquisition times in the `DeltaT` of the OME metadata.
 - The log lists the slices of the output that hold data at every timepoint. A slice in that list is a good place to start looking at the result.
-- The movies of the Align tool are maximum projections along z, so z correction does not change them. The Correct z drift window does not write movies.
+- The movies are maximum projections along z, so z correction does not change them. The Z only tab does not write movies.
 
 `dc z-shifts FILE` measures the drift and saves the CSV file without writing a corrected stack.
 

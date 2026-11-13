@@ -2,144 +2,206 @@ import DCApple
 import DCCore
 import SwiftUI
 
-/// The window for the xy alignment, by the mask centroid or by image matching, with optional z correction
-/// after it. It is centroid_align_xy_gui.py in the Python version.
+/// The Alignment window. It corrects a movie in xy and z, in xy only, or in z only. The user picks a movie and a
+/// channel and runs. When the chosen settings use the embryo mask, the Mask window opens from here. The settings
+/// that change how the correction works are under Advanced options, each with an explanation.
 struct AlignView: View {
     @ObservedObject var job: JobRunner
-    @State private var yamlPath = ""
-    @State private var fps = 2.0
-    @State private var useND2 = false
-    @State private var enlargeCanvas = true
-    @State private var shiftMode: ShiftMode = .subpixel
-    @State private var lowMemory = true
+    @ObservedObject var mask: MaskModel
+    @Environment(\.openWindow) private var openWindow
 
+    /// What the run corrects.
+    enum Mode: Int { case xyz, xy, z }
     /// The part of the image that image matching or z correction follows.
     enum Follow: Int { case mask, box, whole }
     /// The box being drawn, for the xy alignment or for the z correction.
     enum BoxTarget: Int, Identifiable { case xy, z; var id: Int { rawValue } }
     static let xyBoxPrompt = "Drag a box over cells that should stay still in xy. This is the first timepoint, before alignment."
     static let zBoxPrompt = "Drag a box over cells that should stay in the same slice. This is the first timepoint, before alignment."
+
+    @State private var mode: Mode = .xyz
+    @State private var moviePath = ""
+    @State private var yamlPath = ""
     @State private var channels: [String] = []
     @State private var source: URL?
+    @State private var channel = 0
     @State private var boxTarget: BoxTarget?
+    @State private var showAdvanced = false
 
-    // XY alignment by image matching
-    @State private var imageMatching = false
-    @State private var xyChannel = 0
+    // Advanced options for xy
+    @State private var centroidMethod = false
     @State private var xyFollow: Follow = .whole
     @State private var xyBox: CGRect?
+    @State private var hold = true
+    @State private var smoothing = 10.0
+    @State private var maximumAngle = 3.0
 
-    // Z correction
-    @State private var zCorrect = false
-    @State private var zChannel = 0
+    // Advanced options for z
     @State private var zFollow: Follow = .whole
     @State private var zBox: CGRect?
     @State private var dropLargeShifts = false
     @State private var maximumShift = 5.0
+    @State private var span = 5
+
+    // Advanced options for the output
+    @State private var enlargeCanvas = true
+    @State private var fps = 2.0
+    @State private var lowMemory = true
+
+    private var doesXY: Bool { mode != .z }
+    private var doesZ: Bool { mode != .xy }
+    /// The embryo mask is needed for the centroid method, for holding the body, and for following the mask.
+    private var needsMask: Bool {
+        (doesXY && (centroidMethod || hold || xyFollow == .mask)) || (doesZ && zFollow == .mask)
+    }
+    private var hasMovie: Bool { !moviePath.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var hasMask: Bool { !yamlPath.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Form {
-                LabeledContent("Threshold YAML:") {
-                    PathField(placeholder: "Select a threshold YAML file", path: $yamlPath, types: [.yaml, .yml])
-                }
-                LabeledContent("Output video speed:") {
-                    HStack {
-                        TextField("", value: $fps, format: .number.precision(.fractionLength(2))).frame(width: 80)
-                        Stepper("", value: $fps, in: 0.01...1000, step: 0.5).labelsHidden()
-                        Text("fps")
-                    }
-                }
-                Toggle("Load directly from the raw ND2 file", isOn: $useND2)
-                    .toggleStyle(.checkbox)
-                    .help("Uses the ND2 path stored in the YAML instead of the per-embryo TIFF.")
-                Toggle("Enlarge canvas to prevent clipping", isOn: $enlargeCanvas)
-                    .toggleStyle(.checkbox)
-                    .help("Runs the default two-pass alignment. This path calculates the shifts first, expands the canvas, then corrects the shift. No edge data is lost. Turning this off may clip edge data, and with z correction it drops slices that leave the stack.")
-                Picker("Shift:", selection: $shiftMode) {
-                    Text("Sub-pixel (bilinear interpolation)").tag(ShiftMode.subpixel)
-                    Text("Whole pixels (no interpolation)").tag(ShiftMode.integer)
-                }
-                .help("Both run on the GPU. Sub-pixel matches scipy.ndimage.shift(order=1).")
-                Toggle("Use low-memory streaming", isOn: $lowMemory)
-                    .toggleStyle(.checkbox)
-                    .help("Reads frames again in the second pass instead of keeping them in memory. Turn this on if the file is larger than the available RAM.")
-                Picker("XY method:", selection: $imageMatching) {
-                    Text("Mask centroid").tag(false)
-                    Text("Image matching").tag(true)
-                }
-                .help("Mask centroid centres the centroid of the embryo mask at every timepoint. Image matching compares each timepoint with the one before it and moves it to where the two images differ least.")
-                if imageMatching {
-                    channelPicker("XY channel:", selection: $xyChannel,
-                                  help: "The channel that image matching compares. A nuclear marker is the best choice.")
-                    followPicker(selection: $xyFollow, target: .xy, box: xyBox,
-                                 help: "The part of the image that must stay still in xy. To follow only some cells, draw a box over them.")
-                }
-                Toggle("Correct z drift (after xy)", isOn: $zCorrect)
-                    .toggleStyle(.checkbox)
-                    .help("Compares each timepoint with the previous one and moves whole slices so the tissue stays in the same slice. Empty slices fill the gaps. Writes …_xy_z.ome.tif and a table of the shifts.")
-                if zCorrect {
-                    channelPicker("Z channel:", selection: $zChannel,
-                                  help: "The channel whose pattern is followed in z. A nuclear marker is the best choice.")
-                    Toggle("Drop time points with large shifts", isOn: $dropLargeShifts)
-                        .toggleStyle(.checkbox)
-                    if dropLargeShifts {
-                        LabeledContent("Maximum shift (slices):") {
-                            TextField("", value: $maximumShift, format: .number).frame(width: 80)
-                        }
-                    }
-                    followPicker(selection: $zFollow, target: .z, box: zBox,
-                                 help: "The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
-                }
+            Picker("", selection: $mode) {
+                Text("XYZ").tag(Mode.xyz)
+                Text("XY only").tag(Mode.xy)
+                Text("Z only").tag(Mode.z)
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(job.isRunning)
+            ScrollView {
+                Form {
+                    LabeledContent("Movie:") {
+                        PathField(placeholder: "Select an OME-TIFF or ND2 file", path: $moviePath, types: [.tiff, .nd2])
+                    }
+                    channelPicker
+                    if needsMask { maskRow }
+                    DisclosureGroup("Advanced options", isExpanded: $showAdvanced) { advanced }
+                }
+                .padding(.trailing, 8)
+            }
+            .frame(minHeight: showAdvanced ? 320 : 150)
             .disabled(job.isRunning)
             HStack {
                 Text("Compute: \(Services.backend.name)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if hasMovie && needsMask && !hasMask { Text("Make the mask first").font(.caption).foregroundStyle(.secondary) }
                 Button("Cancel") { job.cancel() }.disabled(!job.isRunning)
-                Button("Run alignment") { run() }
+                Button(mode == .xyz ? "Run xyz alignment" : mode == .xy ? "Run xy alignment" : "Run z correction") { run() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(job.isRunning || yamlPath.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(job.isRunning || !hasMovie || (needsMask && !hasMask))
             }
             JobStatusView(job: job)
             LogView(text: job.log)
         }
         .padding()
-        .frame(minWidth: 680, minHeight: 560)
-        .onChange(of: yamlPath) { _, _ in loadChannels() }
-        .onChange(of: useND2) { _, _ in loadChannels() }
-        .onChange(of: zCorrect) { _, on in if on { loadChannels() } }
-        .onChange(of: imageMatching) { _, on in if on { loadChannels() } }
+        .frame(minWidth: 700, minHeight: 620)
+        .onChange(of: moviePath) { _, _ in movieChanged() }
+        .onChange(of: mask.lastSaved) { _, saved in
+            // Pick up a mask that was just saved for this movie.
+            if let url = saved, expand(mask.path) == expand(moviePath) { yamlPath = url.path }
+        }
         .sheet(item: $boxTarget) { target in
             if let url = source {
-                if target == .xy { BoxPicker(source: url, channel: xyChannel, prompt: Self.xyBoxPrompt, box: $xyBox) }
-                else { BoxPicker(source: url, channel: zChannel, prompt: Self.zBoxPrompt, box: $zBox) }
+                BoxPicker(source: url, channel: channel, prompt: target == .xy ? Self.xyBoxPrompt : Self.zBoxPrompt,
+                          box: target == .xy ? $xyBox : $zBox)
             }
         }
     }
 
-    /// A picker of the channels of the file that the YAML file points to.
+    /// A short explanation shown under a setting.
+    private func note(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+
     @ViewBuilder
-    private func channelPicker(_ label: String, selection: Binding<Int>, help: String) -> some View {
+    private var channelPicker: some View {
         if channels.isEmpty {
-            LabeledContent(label) { Text("Select a threshold YAML to list the channels").foregroundStyle(.secondary) }
+            LabeledContent("Channel:") { Text("Select a movie to list the channels").foregroundStyle(.secondary) }
         } else {
-            Picker(label, selection: selection) {
+            Picker("Channel:", selection: $channel) {
                 ForEach(channels.indices, id: \.self) { Text(channels[$0]).tag($0) }
             }
-            .help(help)
+            note("The channel whose pattern is followed. A nuclear marker is the best choice, because its pattern stays the same from one timepoint to the next.")
+        }
+    }
+
+    @ViewBuilder
+    private var maskRow: some View {
+        LabeledContent("Embryo mask:") {
+            HStack {
+                PathField(placeholder: "No mask yet", path: $yamlPath, types: [.yaml, .yml])
+                Button("Make mask…") {
+                    mask.open(path: moviePath, channel: channel)
+                    openWindow(id: "mask")
+                }
+                .disabled(!hasMovie)
+            }
+        }
+        note("These settings use the embryo mask. Make mask opens the threshold window with a suggested threshold. Adjust it, save, and the saved file appears here. You can also browse to a threshold YAML file you saved before.")
+    }
+
+    @ViewBuilder
+    private var advanced: some View {
+        if doesXY {
+            Section("XY") {
+                Picker("Method:", selection: $centroidMethod) {
+                    Text("Image matching").tag(false)
+                    Text("Mask centroid").tag(true)
+                }
+                note("Image matching compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. Mask centroid moves the centre of the embryo mask to the middle of the frame, without turning.")
+                if !centroidMethod {
+                    followPicker(selection: $xyFollow, target: .xy, box: xyBox)
+                    note("The part of the image that the matching compares. Whole frame uses every pixel. Embryo mask uses the tissue only. A box follows only the cells inside it.")
+                    Toggle("Hold the body in place with the embryo mask", isOn: $hold).toggleStyle(.checkbox)
+                    note("Matching alone follows the cells. When cells move through the body, the frame slowly travels with them. With this on, the embryo mask keeps the body in the middle of the frame and pointing the same way.")
+                    if hold {
+                        LabeledContent("Averaging (timepoints):") { TextField("", value: $smoothing, format: .number).frame(width: 80) }
+                        note("The mask is rough at a single timepoint, so its position and direction are averaged over about this many timepoints. A small value follows the mask closely and can wobble. A large value is steadier and lets the body glide further before it is pulled back.")
+                    }
+                    LabeledContent("Largest turn (degrees):") { TextField("", value: $maximumAngle, format: .number).frame(width: 80) }
+                    note("The largest turn between two neighbouring timepoints that the matching looks for. With 0 it only shifts and never turns.")
+                }
+            }
+        }
+        if doesZ {
+            Section("Z") {
+                followPicker(selection: $zFollow, target: .z, box: zBox)
+                note("The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
+                LabeledContent("Also compare this many timepoints back:") {
+                    Stepper("\(span)", value: $span, in: 1...50)
+                }
+                note("A slow movement is too small to measure between neighbouring timepoints. Each timepoint is also compared with an earlier one, where the movement has added up. With 1 only neighbours are compared.")
+                Toggle("Drop time points with large shifts", isOn: $dropLargeShifts).toggleStyle(.checkbox)
+                if dropLargeShifts {
+                    LabeledContent("Maximum shift (slices):") { TextField("", value: $maximumShift, format: .number).frame(width: 80) }
+                }
+                note("Leaves out timepoints whose z movement from the timepoint before them is larger than the maximum, for example after the stage was moved. Later timepoints are still corrected for that movement.")
+            }
+        }
+        Section("Output") {
+            Toggle("Enlarge the canvas and the stack so that nothing is cut off", isOn: $enlargeCanvas).toggleStyle(.checkbox)
+            note("Adds empty pixels around the frame and empty slices to the stack, so that data moved by the correction stays in the file. With this off the file keeps its size and data that moves outside is lost.")
+            if doesXY {
+                LabeledContent("Movie speed:") {
+                    HStack {
+                        TextField("", value: $fps, format: .number.precision(.fractionLength(2))).frame(width: 80)
+                        Text("fps")
+                    }
+                }
+                note("The playback speed of the MP4 movies that are written next to the corrected file.")
+            }
+            Toggle("Use low-memory streaming", isOn: $lowMemory).toggleStyle(.checkbox)
+            note("Reads the movie from disk a second time when writing, instead of keeping it in memory. Leave this on when the file is larger than the available memory. Turning it off is faster for small files.")
         }
     }
 
     /// A picker of the region to follow, with a button to draw the box when the box is chosen.
     @ViewBuilder
-    private func followPicker(selection: Binding<Follow>, target: BoxTarget, box: CGRect?, help: String) -> some View {
+    private func followPicker(selection: Binding<Follow>, target: BoxTarget, box: CGRect?) -> some View {
         Picker("Follow:", selection: selection) {
             Text("Whole frame").tag(Follow.whole)
             Text("Embryo mask").tag(Follow.mask)
             Text("A box I draw").tag(Follow.box)
         }
-        .help(help)
         if selection.wrappedValue == .box {
             LabeledContent("Box:") {
                 HStack {
@@ -151,7 +213,7 @@ struct AlignView: View {
     }
 
     private func boxLabel(_ box: CGRect?) -> String {
-        guard let b = box else { return source == nil ? "Select a threshold YAML first" : "No box yet" }
+        guard let b = box else { return source == nil ? "Select a movie first" : "No box yet" }
         return "x \(Int(b.minX)), y \(Int(b.minY)), \(Int(b.width)) × \(Int(b.height)) px"
     }
 
@@ -164,86 +226,107 @@ struct AlignView: View {
         }
     }
 
-    /// Find the image file that the YAML file points to and list its channels.
-    private func loadChannels() {
-        guard zCorrect || imageMatching else { return }
-        let yaml = expand(yamlPath)
-        let nd2 = useND2
+    /// List the channels of the selected movie and look for a mask that was saved for it.
+    private func movieChanged() {
+        let url = expand(moviePath)
         Task.detached(priority: .userInitiated) {
             var names: [String] = []
             var file: URL?
-            var threshold = 0
-            if let cfg = try? ThresholdConfig.load(yaml) {
-                threshold = cfg.parameters.channelIndex
-                let url = nd2 ? URL(fileURLWithPath: cfg.sourceFile)
-                              : (try? AlignPipeline.resolveTIF(yaml: yaml, sourceFile: cfg.sourceFile).url)
-                if let u = url, let src = try? ProjectionSource(url: u, backend: Services.backend) {
-                    names = Array(src.channelNames.prefix(src.c))
-                    file = u
+            var saved: URL?
+            if FileManager.default.fileExists(atPath: url.path), let src = try? ProjectionSource(url: url, backend: Services.backend) {
+                names = Array(src.channelNames.prefix(src.c))
+                file = url
+                // The Mask window saves `{name}_{channel}_threshold.yaml` next to the movie. Take the newest one.
+                let stem = PyFormat.stemWithoutOME(url)
+                let folder = url.deletingLastPathComponent()
+                let found = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+                    .filter { $0.lastPathComponent.hasPrefix(stem + "_") && $0.lastPathComponent.hasSuffix("_threshold.yaml") }
+                saved = found.max { a, b in
+                    let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    return da < db
                 }
             }
-            // Start on a channel whose name looks like a nuclear marker. Without one, start on the threshold channel.
+            // Start on a channel whose name looks like a nuclear marker.
             let nuclear = names.firstIndex { n in ["mcherry", "h2b", "nuc", "dapi", "hoechst"].contains { n.lowercased().contains($0) } }
-            let choice = nuclear ?? min(threshold, max(0, names.count - 1))
-            let foundNames = names, foundFile = file
+            let foundNames = names, foundFile = file, foundMask = saved
             await MainActor.run {
-                if foundFile != source { xyBox = nil; zBox = nil }
+                if foundFile != source { xyBox = nil; zBox = nil; yamlPath = foundMask?.path ?? "" }
                 source = foundFile
                 if foundNames != channels {
                     channels = foundNames
-                    xyChannel = choice
-                    zChannel = choice
+                    channel = nuclear ?? 0
                 }
             }
         }
     }
 
     private func run() {
-        let yaml = expand(yamlPath)
-        guard FileManager.default.fileExists(atPath: yaml.path) else {
-            showAlert("Invalid YAML file", "Select an existing YAML file.")
-            return
+        let movie = expand(moviePath)
+        guard FileManager.default.fileExists(atPath: movie.path) else {
+            showAlert("Invalid movie", "Select an existing OME-TIFF or ND2 file."); return
         }
-        if !["yaml", "yml"].contains(yaml.pathExtension.lowercased()) {
-            let a = NSAlert()
-            a.messageText = "Unexpected file type"
-            a.informativeText = "The selected file does not have a .yaml or .yml extension. Continue anyway?"
-            a.addButton(withTitle: "Continue")
-            a.addButton(withTitle: "Cancel")
-            if a.runModal() != .alertFirstButtonReturn { return }
-        }
-        guard fps.isFinite && fps > 0 else { showAlert("Invalid speed", "FPS must be a positive number."); return }
-        var o = AlignOptions(yaml: yaml)
-        o.useND2 = useND2
-        o.fps = fps
-        o.enlargeCanvas = enlargeCanvas
-        o.shiftMode = shiftMode
-        o.lowMemory = lowMemory
-        if imageMatching {
-            var m = XYMatchOptions()
-            if !channels.isEmpty { m.channelIndex = xyChannel }
-            guard let r = region(xyFollow, box: xyBox) else {
-                showAlert("No box", "Draw a box over the cells to follow in xy, or choose another option."); return
+        var yaml: URL?
+        if needsMask {
+            let url = expand(yamlPath)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                showAlert("No mask", "These settings use the embryo mask. Make the mask first, or select a threshold YAML file."); return
             }
-            m.region = r
-            o.xyMatching = m
+            yaml = url
         }
-        if zCorrect {
-            if dropLargeShifts && (!maximumShift.isFinite || maximumShift <= 0) {
-                showAlert("Invalid maximum shift", "Enter a positive number of slices."); return
-            }
-            var z = ZCorrectionOptions()
+        if doesZ && dropLargeShifts && (!maximumShift.isFinite || maximumShift <= 0) {
+            showAlert("Invalid maximum shift", "Enter a positive number of slices."); return
+        }
+        var z = ZCorrectionOptions()
+        if doesZ {
             z.maximumStep = dropLargeShifts ? maximumShift : nil
-            if !channels.isEmpty { z.channelIndex = zChannel }
+            z.span = span
+            if !channels.isEmpty { z.channelIndex = channel }
             guard let r = region(zFollow, box: zBox) else {
                 showAlert("No box", "Draw a box over the cells to follow in z, or choose another option."); return
             }
             z.region = r
-            o.zCorrection = z
         }
-        let options = o
         job.clearLog()
-        job.append("Running alignment: \(yaml.path)\n")
+        if mode == .z {
+            var o = ZCorrectOptions(input: movie)
+            o.z = z
+            o.yaml = yaml
+            o.enlargeStack = enlargeCanvas
+            o.lowMemory = lowMemory
+            let options = o
+            job.append("Correcting z drift: \(movie.path)\n")
+            job.start(runningStatus: "Running…") { ctx in
+                let start = Date()
+                _ = try ZCorrectPipeline.run(options: options, backend: Services.backend, context: ctx)
+                ctx.log("\nZ correction completed.")
+                return String(format: "Completed successfully in %.1f s", Date().timeIntervalSince(start))
+            }
+            return
+        }
+        guard fps.isFinite && fps > 0 else { showAlert("Invalid speed", "The movie speed must be a positive number."); return }
+        guard smoothing.isFinite && smoothing >= 0 && maximumAngle.isFinite && maximumAngle >= 0 else {
+            showAlert("Invalid setting", "The averaging and the largest turn must be 0 or positive."); return
+        }
+        var o = AlignOptions(source: movie, yaml: yaml)
+        o.fps = fps
+        o.enlargeCanvas = enlargeCanvas
+        o.lowMemory = lowMemory
+        if !centroidMethod {
+            var m = XYMatchOptions()
+            if !channels.isEmpty { m.channelIndex = channel }
+            guard let r = region(xyFollow, box: xyBox) else {
+                showAlert("No box", "Draw a box over the cells to follow in xy, or choose another option."); return
+            }
+            m.region = r
+            m.holdInPlace = hold
+            m.smoothing = smoothing
+            m.maximumAngle = maximumAngle
+            o.xyMatching = m
+        }
+        if doesZ { o.zCorrection = z }
+        let options = o
+        job.append("Running alignment: \(movie.path)\n")
         job.start(runningStatus: "Running…") { ctx in
             let start = Date()
             _ = try AlignPipeline(options: options, backend: Services.backend, movies: Services.movies, context: ctx).run()

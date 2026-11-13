@@ -317,11 +317,73 @@ final class ZCorrectionTests: XCTestCase {
         let a = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0).floatPlane(6)))
         for (dy, dx) in [(0, 0), (3, -2), (-17, 25), (38, -41)] {
             let b = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0, dy: dy, dx: dx).floatPlane(6)))
-            let m = XYMatch.match(a, b)
-            XCTAssertEqual(m.dy, -dy, "move \(dy), \(dx)")
-            XCTAssertEqual(m.dx, -dx, "move \(dy), \(dx)")
-            XCTAssertLessThan(m.cost, 0.1)
+            // A pure shift is found exactly, also when angles are tried.
+            for maximumAngle in [0.0, 3.0] {
+                let m = XYMatch.match(a, b, maximumAngle: maximumAngle)
+                XCTAssertEqual(m.step, Rigid.shift(dx: Double(-dx), dy: Double(-dy)), "move \(dy), \(dx)")
+                XCTAssertLessThan(m.cost, 0.1)
+            }
         }
+    }
+
+    func testXYMatchFindsRotation() {
+        let n = Self.size, mid = Double(n - 1) / 2
+        let first = frame(offset: 0)
+        let a = XYMatch.prepare(Image2D(width: n, height: n, pixels: first.floatPlane(6)))
+        for (degrees, dx, dy) in [(2.0, 5.0, -4.0), (-1.5, -12.0, 9.0)] {
+            // Turn and shift the scene, and check that the match undoes both.
+            let move = Rigid.shift(dx: dx, dy: dy).after(Rigid.rotation(degrees: degrees, aboutX: mid, y: mid))
+            let b = XYMatch.prepare(Image2D(width: n, height: n, pixels: Shift.warp(first, pad: .none, transform: move).floatPlane(6)))
+            let m = XYMatch.match(a, b, maximumAngle: 3)
+            XCTAssertEqual(m.step.degrees, -degrees, accuracy: 0.2)
+            let round = m.step.after(move)
+            for point in [(mid, mid), (mid + 50, mid), (mid, mid - 50)] {
+                let q = round.apply(x: point.0, y: point.1)
+                XCTAssertEqual(q.x, point.0, accuracy: 1.5, "\(degrees)")
+                XCTAssertEqual(q.y, point.1, accuracy: 1.5, "\(degrees)")
+            }
+            XCTAssertLessThan(m.cost, 0.15)
+        }
+    }
+
+    func testAnchorHoldsTheBody() {
+        // The cells move through the body by 1 pixel and turn by half a degree at every step, and at timepoint 10
+        // the stage jumps by 20 pixels. The body itself does not move or turn apart from that jump.
+        let T = 30, w = 200, h = 100
+        let mid = (x: Double(w - 1) / 2, y: Double(h - 1) / 2)
+        var steps: [Rigid] = [], poses: [BodyPose?] = []
+        for t in 0..<T {
+            let jump = t >= 10 ? 20.0 : 0
+            steps.append(Rigid.shift(dx: t == 10 ? -21 : -1, dy: 0).after(Rigid.rotation(degrees: 0.5, aboutX: 80 + jump, y: 40)))
+            poses.append(BodyPose(x: 80 + jump, y: 40, angle: 20, elongation: 3))
+        }
+        let held = Anchor.transforms(steps: steps, poses: poses, smoothing: 2, width: w, height: h)
+        let free = Anchor.transforms(steps: steps, poses: nil, smoothing: 2, width: w, height: h)
+        for t in 6..<24 {
+            // With the anchor the body stays in the middle and keeps its direction.
+            let q = held[t].apply(x: poses[t]!.x, y: poses[t]!.y)
+            XCTAssertEqual(q.x, mid.x, accuracy: 0.5, "t\(t)")
+            XCTAssertEqual(q.y, mid.y, accuracy: 0.5, "t\(t)")
+            XCTAssertEqual(held[t].degrees, 0, accuracy: 0.2, "t\(t)")
+        }
+        // Without it the sum of the steps carries the body away.
+        XCTAssertGreaterThan(abs(free[T - 1].apply(x: 100, y: 40).x - 100), 20)
+        XCTAssertEqual(free[T - 1].degrees, 0.5 * Double(T - 1), accuracy: 1e-6)
+    }
+
+    func testPositionsUseComparisonsFurtherBack() {
+        // The tissue sinks by a fifth of a slice at every step. Neighbours measure no movement, and the
+        // comparison five timepoints back measures one slice.
+        let T = 41
+        var edges: [(i: Int, j: Int, d: Double)] = (1..<T).map { ($0 - 1, $0, 0.0) }
+        XCTAssertEqual(ZDrift.positions(count: T, edges: edges)[T - 1], 0, accuracy: 1e-6)
+        for t in 5..<T { edges.append((t - 5, t, -1.0)) }
+        let z = ZDrift.positions(count: T, edges: edges)
+        XCTAssertLessThan(z[T - 1], -0.15 * Double(T - 1))
+        XCTAssertEqual(z[0], 0)
+        // With only neighbours, the positions are the sum of the steps.
+        let chain = ZDrift.positions(count: 4, edges: [(0, 1, 2.0), (1, 2, -0.5), (2, 3, 1.0)])
+        for (a, b) in zip(chain, [0, 2, 1.5, 2.5]) { XCTAssertEqual(a, b, accuracy: 1e-6) }
     }
 
     func testAlignByImageMatching() throws {
@@ -332,6 +394,7 @@ final class ZCorrectionTests: XCTestCase {
             var opts = AlignOptions(yaml: yaml)
             opts.xyMatching = XYMatchOptions()
             opts.xyMatching?.region = region
+            opts.xyMatching?.holdInPlace = false
             let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
             // Every timepoint moves back onto the first one.
             for (t, m) in moves.enumerated() {
@@ -358,6 +421,7 @@ final class ZCorrectionTests: XCTestCase {
         let tif = try writeMovie("P0_concat.ome.tif", offsets: offsets, moves: moves, stage: false)
         var opts = AlignOptions(yaml: try writeYAML(for: tif))
         opts.xyMatching = XYMatchOptions()
+        opts.xyMatching?.holdInPlace = false
         opts.zCorrection = ZCorrectionOptions()
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(r.zPlans[0].shift, offsets)
@@ -374,5 +438,30 @@ final class ZCorrectionTests: XCTestCase {
             XCTAssertGreaterThan(compared, 10_000, "t\(t)")
             XCTAssertEqual(same, compared, "t\(t)")
         }
+    }
+
+    func testImageMatchingHoldsTheBodyInTheMiddle() throws {
+        // The scene and its mask move together, so holding the body must put the scene in the same place at every
+        // timepoint, with the centre of the bright disc in the middle of the frame.
+        let moves = [(0, 0), (4, -3), (9, 2), (-12, 15), (-10, 14), (3, 3)]
+        let tif = try writeMovie("P0_concat.ome.tif", offsets: [0, 0, 0, 0, 0, 0], moves: moves, stage: false)
+        var opts = AlignOptions(yaml: try writeYAML(for: tif))
+        opts.xyMatching = XYMatchOptions()
+        let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
+        let out = try TIFFStack(url: r.tiffs[0])
+        let first = try out.readFrame(0).floatPlane(6)
+        for t in 1..<moves.count {
+            let plane = try out.readFrame(t).floatPlane(6)
+            var difference = 0.0, total = 0.0
+            for i in plane.indices where plane[i] > 0 && first[i] > 0 { difference += Double(abs(plane[i] - first[i])); total += Double(first[i]) }
+            XCTAssertLessThan(difference / total, 0.05, "t\(t)")
+        }
+        // The disc is centred in the scene, and the output canvas grows evenly enough that it stays near the middle.
+        let width = out.x, height = out.y
+        var sx = 0.0, sy = 0.0, n = 0.0
+        for y in 0..<height { for x in 0..<width where first[y * width + x] > 400 { sx += Double(x); sy += Double(y); n += 1 } }
+        let pad = Padding.covering(transforms: r.transforms[0], width: Self.size, height: Self.size)
+        XCTAssertEqual(sx / n - Double(pad.left), Double(Self.size - 1) / 2, accuracy: 3)
+        XCTAssertEqual(sy / n - Double(pad.top), Double(Self.size - 1) / 2, accuracy: 3)
     }
 }

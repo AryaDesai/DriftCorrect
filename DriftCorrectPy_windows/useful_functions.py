@@ -637,8 +637,8 @@ def find_largest_mask_xy(smoothed, percentile, method="percentile", block_size=3
     return mask, np.argwhere(mask).mean(axis=0)
 
 
-def compute_shift_xy(frame, params, backend=None):
-    """(dy, dx) that moves the embryo centroid of one (C, Z, Y, X) frame to the frame centre.
+def detect_embryo_xy(frame, params, backend=None):
+    """Return the embryo mask of one (C, Z, Y, X) frame and its centroid [cy, cx].
 
     `params` is a normalized threshold parameter dict (see get_threshold_params_for_timepoint).
     """
@@ -646,13 +646,11 @@ def compute_shift_xy(frame, params, backend=None):
     ch = params["channel_index"]
     if not 0 <= ch < frame.shape[0]:
         raise ValueError(f"Threshold channel index {ch} is out of range (the data has {frame.shape[0]} channel(s))")
-    Y, X = frame.shape[2], frame.shape[3]
     projection = backend.max_project(frame, ch)
     smoothed = backend.gaussian(projection, params["sigma"])
-    _, centroid = find_largest_mask_xy(smoothed, params["percentile"], method=params.get("method", "percentile"),
-                                       block_size=params.get("block_size", 64), invert=params.get("invert", False),
-                                       levels=params.get("levels", 3), selected_levels=params.get("selected_levels"))
-    return Y / 2 - centroid[0], X / 2 - centroid[1]
+    return find_largest_mask_xy(smoothed, params["percentile"], method=params.get("method", "percentile"),
+                                block_size=params.get("block_size", 64), invert=params.get("invert", False),
+                                levels=params.get("levels", 3), selected_levels=params.get("selected_levels"))
 
 
 def shift_line(dy, dx):

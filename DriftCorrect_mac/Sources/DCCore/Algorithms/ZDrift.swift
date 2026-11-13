@@ -10,12 +10,6 @@ public enum FollowRegion: Equatable, Sendable {
     case box(x: Int, y: Int, width: Int, height: Int)
 }
 
-/// A box in pixels of the frame after it is moved in xy.
-public struct ZBox: Equatable, Sendable {
-    public var x: Int, y: Int, width: Int, height: Int
-    public init(x: Int, y: Int, width: Int, height: Int) { self.x = x; self.y = y; self.width = width; self.height = height }
-}
-
 /// The data that z correction keeps of one timepoint, which is a reduced copy of the channel it follows.
 public struct ZDescriptor: @unchecked Sendable {
     public let z: Int
@@ -65,31 +59,37 @@ public enum ZDrift {
     /// A match with a mismatch above this value is flagged in the log and the table.
     static let weakCost = 0.27
 
-    /// Reduce one timepoint to the data that the comparison with its neighbours needs.
-    /// `shift` is the xy shift of this timepoint in whole pixels. With `mask` the region is the mask, with `box` it
-    /// is the box, and with neither it is the whole frame.
-    public static func describe(frame: Volume, channel: Int, shift: (dy: Int, dx: Int) = (0, 0), mask: Mask2D? = nil,
-                                box: ZBox? = nil) -> ZDescriptor {
+    /// Reduce one timepoint to the data that the comparison with another timepoint needs. `region` marks the
+    /// pixels of the frame to follow, and without it the whole frame is followed. `transform` moves the timepoint
+    /// in xy before it is reduced. The xy alignment gives it, so that two timepoints are compared in z with the
+    /// same tissue on top of each other.
+    public static func describe(frame: Volume, channel: Int, region: [Bool]? = nil, transform: Rigid = .identity) -> ZDescriptor {
         let Z = frame.z, Y = frame.y, X = frame.x
         let h4 = Y / 4, w4 = X / 4, n4 = h4 * w4
-        let dy = shift.dy, dx = shift.dx
+        let moving = transform != .identity
+        // Each pixel of the moved frame reads the source at the position that the opposite transform gives.
+        let back = transform.inverse
 
-        // Bin the channel by 4 in xy and move it by the xy shift. Source pixels outside the frame count as 0.
+        // Move the channel and bin it by 4 in xy. Values between pixels are interpolated from the four nearest
+        // pixels, and a pixel outside the frame counts as 0.
         var p4 = [Float](repeating: 0, count: Z * n4)
         p4.withUnsafeMutableBufferPointer { out in
             Parallel.forEach(Z) { zi in
                 let plane = frame.planeIndex(c: channel, z: zi)
+                @inline(__always) func source(_ yy: Int, _ xx: Int) -> Float {
+                    (yy < 0 || yy >= Y || xx < 0 || xx >= X) ? 0 : frame.sample(plane: plane, index: yy * X + xx)
+                }
                 for y in 0..<h4 {
                     for x in 0..<w4 {
                         var s: Float = 0
-                        for j in 0..<4 {
-                            let sy = 4 * y + j - dy
-                            if sy < 0 || sy >= Y { continue }
-                            for i in 0..<4 {
-                                let sx = 4 * x + i - dx
-                                if sx >= 0 && sx < X { s += frame.sample(plane: plane, index: sy * X + sx) }
-                            }
-                        }
+                        for j in 0..<4 { for i in 0..<4 {
+                            if !moving { s += frame.sample(plane: plane, index: (4 * y + j) * X + 4 * x + i); continue }
+                            let q = back.apply(x: Double(4 * x + i), y: Double(4 * y + j))
+                            let x0 = Int(q.x.rounded(.down)), y0 = Int(q.y.rounded(.down))
+                            let fx = Float(q.x - Double(x0)), fy = Float(q.y - Double(y0))
+                            s += (source(y0, x0) * (1 - fx) + source(y0, x0 + 1) * fx) * (1 - fy)
+                                + (source(y0 + 1, x0) * (1 - fx) + source(y0 + 1, x0 + 1) * fx) * fy
+                        } }
                         out[zi * n4 + y * w4 + x] = s / 16
                     }
                 }
@@ -117,26 +117,30 @@ public enum ZDrift {
             }
         }
 
-        // Build the region at the resolution binned by 4, in the coordinates of the frame after the xy shift.
-        var region4 = [Bool](repeating: mask == nil && box == nil, count: n4)
-        if let m = mask, n4 > 0 {
-            for sy in 0..<min(m.height, Y) {
-                let cy = (sy + dy) / 4
-                if sy + dy < 0 || cy >= h4 { continue }
-                for sx in 0..<min(m.width, X) where m.bits[sy * m.width + sx] {
-                    let cx = (sx + dx) / 4
-                    if sx + dx >= 0 && cx < w4 { region4[cy * w4 + cx] = true }
-                }
-            }
-            region4 = dilate(region4, w: w4, h: h4, radius: 3)
-        } else if let b = box, n4 > 0 {
-            let y0 = max(0, b.y / 4), y1 = min(h4, (b.y + b.height + 3) / 4)
-            let x0 = max(0, b.x / 4), x1 = min(w4, (b.x + b.width + 3) / 4)
-            if y0 < y1 && x0 < x1 { for y in y0..<y1 { for x in x0..<x1 { region4[y * w4 + x] = true } } }
+        // Bin the region by 4. A binned pixel is in the region when any of its pixels is.
+        var region4 = [Bool](repeating: region == nil, count: n4)
+        if let r = region, r.count == X * Y {
+            for y in 0..<h4 { for x in 0..<w4 {
+                var any = false
+                for j in 0..<4 { for i in 0..<4 {
+                    var sx = 4 * x + i, sy = 4 * y + j
+                    if moving {
+                        let q = back.apply(x: Double(sx), y: Double(sy))
+                        sx = Int(q.x.rounded()); sy = Int(q.y.rounded())
+                        if sx < 0 || sx >= X || sy < 0 || sy >= Y { continue }
+                    }
+                    if r[sy * X + sx] { any = true }
+                } }
+                region4[y * w4 + x] = any
+            } }
         }
+        return assemble(z: Z, h: h4, w: w4, planes: p4, valid: valid4, region: region4)
+    }
 
-        // Make the copy binned by 16 for the coarse search in xy. A coarse pixel is valid when all of its pixels
-        // hold data, and it is in the region when at least half of them are.
+    /// Build a descriptor from planes binned by 4. This adds the copy binned by 16 for the coarse search in xy. A
+    /// coarse pixel is valid when all of its pixels hold data, and it is in the region when at least half of them are.
+    static func assemble(z Z: Int, h h4: Int, w w4: Int, planes p4: [Float], valid valid4: [Bool], region region4: [Bool]) -> ZDescriptor {
+        let n4 = h4 * w4
         let ch = h4 / 4, cw = w4 / 4, nc = ch * cw
         var coarse = [Float](repeating: 0, count: Z * nc)
         var coarseValid = [Bool](repeating: false, count: nc), coarseRegion = [Bool](repeating: false, count: nc)
@@ -167,6 +171,53 @@ public enum ZDrift {
         }
         return ZDescriptor(z: Z, h: h4, w: w4, planes: p4, valid: valid4, region: region4, ch: ch, cw: cw, coarse: coarse,
                            coarseValid: coarseValid, coarseRegion: coarseRegion)
+    }
+
+    /// Find the z position of every timepoint from measured movements between pairs of timepoints. An edge says
+    /// that the tissue moved by `d` slices from timepoint `i` to timepoint `j`. Neighbouring timepoints give one
+    /// edge each, and pairs further apart give more. The positions are the ones that agree best with all edges. An
+    /// edge that disagrees strongly with the rest counts less. The first timepoint is at 0.
+    static func positions(count T: Int, edges: [(i: Int, j: Int, d: Double)]) -> [Double] {
+        var z = [Double](repeating: 0, count: T)
+        guard T > 1 else { return z }
+        // Start from the sum of the movements between neighbours.
+        var neighbour = [Double](repeating: 0, count: T)
+        for e in edges where e.j == e.i + 1 { neighbour[e.j] = e.d }
+        for t in 1..<T { z[t] = z[t - 1] + neighbour[t] }
+        // Apply the weighted edges to a vector. This is the matrix of the least squares problem.
+        var weight = [Double](repeating: 1, count: edges.count)
+        func applied(_ v: [Double]) -> [Double] {
+            var out = [Double](repeating: 0, count: T)
+            for (k, e) in edges.enumerated() {
+                let r = weight[k] * (v[e.j] - v[e.i])
+                out[e.j] += r; out[e.i] -= r
+            }
+            out[0] = 0
+            return out
+        }
+        func dot(_ a: [Double], _ b: [Double]) -> Double { zip(a, b).reduce(0) { $0 + $1.0 * $1.1 } }
+        for _ in 0..<8 {
+            // Give each edge a weight that falls off once its error exceeds about a third of a slice.
+            for (k, e) in edges.enumerated() {
+                let r = (z[e.j] - z[e.i] - e.d) / 0.3
+                weight[k] = 1 / (1 + r * r).squareRoot()
+            }
+            var rhs = [Double](repeating: 0, count: T)
+            for (k, e) in edges.enumerated() { rhs[e.j] += weight[k] * e.d; rhs[e.i] -= weight[k] * e.d }
+            rhs[0] = 0
+            // Solve with the conjugate gradient method, starting from the current positions.
+            var r = zip(rhs, applied(z)).map { $0 - $1 }
+            var p = r, rr = dot(r, r)
+            for _ in 0..<(4 * T) where rr > 1e-18 {
+                let ap = applied(p)
+                let alpha = rr / dot(p, ap)
+                for t in 1..<T { z[t] += alpha * p[t]; r[t] -= alpha * ap[t] }
+                let next = dot(r, r)
+                for t in 1..<T { p[t] = r[t] + next / rr * p[t] }
+                rr = next
+            }
+        }
+        return z
     }
 
     // MARK: Helpers
@@ -344,13 +395,15 @@ public enum ZDrift {
     ///     A position that stays close to a midpoint would otherwise make the output switch between two slices.
     ///   - pad: When true, empty slices are added so that no slice is lost. When false, slices that leave the
     ///     stack are dropped.
-    public static func plan(steps: [Double], reference: Int = 0, deadBand: Double = 0.15, pad: Bool = true, maximumStep: Double? = nil) -> ZPlan {
+    ///   - positions: The position of the tissue at every timepoint. Without it the movements are added up.
+    public static func plan(steps: [Double], positions: [Double]? = nil, reference: Int = 0, deadBand: Double = 0.15,
+                            pad: Bool = true, maximumStep: Double? = nil) -> ZPlan {
         let T = steps.count
         guard T > 0 else { return ZPlan(position: [], shift: [], padLow: 0, padHigh: 0, kept: []) }
-        // Add up the movements to get the position of the tissue at every timepoint, relative to the reference
-        // timepoint.
+        // Take the position of the tissue at every timepoint, or add up the movements to get it. It is then made
+        // relative to the reference timepoint.
         var pos = [Double](repeating: 0, count: T)
-        for t in 1..<max(1, T) { pos[t] = pos[t - 1] + steps[t] }
+        if let given = positions, given.count == T { pos = given } else { for t in 1..<max(1, T) { pos[t] = pos[t - 1] + steps[t] } }
         let ref = min(max(0, reference), T - 1)
         let p0 = pos[ref]
         pos = pos.map { $0 - p0 }
