@@ -176,7 +176,7 @@ struct Align: ParsableCommand {
     @Option(help: "Frames per second of the movies (default: 2).")
     var fps: Double = 2
 
-    @Flag(name: [.customLong("no-enlarge-canvas"), .customLong("no_enlarge_canvas")], help: "Single pass without canvas expansion (edge data may be clipped).")
+    @Flag(name: [.customLong("no-enlarge-canvas"), .customLong("no_enlarge_canvas")], help: "Keep the original canvas (edge data may be clipped).")
     var noEnlargeCanvas = false
 
     @Flag(name: [.customLong("use-gpu"), .customLong("use_gpu")], help: "Whole-pixel shifts, as the Python --use_gpu path produced. (The GPU is always used.)")

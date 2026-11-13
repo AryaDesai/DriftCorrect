@@ -7,9 +7,9 @@ one aligned and one unaligned MP4 per channel.
 Every YAML setting is used: method, invert, levels, selected classes, block
 size and the per-timepoint parameters.
 
-Two-pass canvas expansion is the default: Pass 1 computes all shifts,
-Pass 2 pads the canvas so no data is clipped and applies the shifts.
---no_enlarge_canvas uses one pass on the original canvas.
+The alignment runs in two passes. Pass 1 computes all shifts. Pass 2 pads
+the canvas so that no data is clipped and applies the shifts.
+--no_enlarge_canvas keeps the original canvas, so edge data may be clipped.
 
 Shift modes: "subpixel" (scipy bilinear, the default) or "integer" (whole
 pixels, which the old --use_gpu path produced). The GPU is used
@@ -41,7 +41,7 @@ def parse_args(argv=None):
     parser.add_argument("--use_nd2", action="store_true", help="Load from the ND2 file instead of the per-embryo TIF.")
     parser.add_argument("--fps", type=float, default=2, help="Frames per second of the movies (default: 2)")
     parser.add_argument("--no_enlarge_canvas", action="store_true",
-                        help="Single pass without canvas expansion (edge data may be clipped).")
+                        help="Keep the original canvas (edge data may be clipped).")
     parser.add_argument("--shift_mode", choices=SHIFT_MODES, default=None,
                         help="subpixel (bilinear, default) or integer (whole pixels).")
     parser.add_argument("--use_gpu", action="store_true",
@@ -111,122 +111,78 @@ def align(args):
     shifts = [[] for _ in range(P)]
     written = []
     try:
-        if not args.no_enlarge_canvas:
-            cache = {} if (not args.low_memory and source.frame_bytes * T * P <= 0.4 * physical_memory()) else None
-            log("\n--- Pass 1: precomputing shifts ---")
-            for p in range(P):
-                log(f"\n  Embryo {p}/{P - 1}:")
-                unaligned = movies(p, False, Y, X)
+        cache = {} if (not args.low_memory and source.frame_bytes * T * P <= 0.4 * physical_memory()) else None
+        log("\n--- Pass 1: precomputing shifts ---")
+        for p in range(P):
+            log(f"\n  Embryo {p}/{P - 1}:")
+            unaligned = movies(p, False, Y, X)
 
-                def pass1(t, p=p, unaligned=unaligned):
-                    frame = source.read_frame(t, p)
-                    dy, dx = compute_shift_xy(frame, params_at(t), backend)
-                    gray = ChannelMovies.gray_frames(backend.max_project_all(frame)) if unaligned else None
-                    if cache is not None:
-                        cache[(p, t)] = frame
-                    return dy, dx, gray
+            def pass1(t, p=p, unaligned=unaligned):
+                frame = source.read_frame(t, p)
+                dy, dx = compute_shift_xy(frame, params_at(t), backend)
+                gray = ChannelMovies.gray_frames(backend.max_project_all(frame)) if unaligned else None
+                if cache is not None:
+                    cache[(p, t)] = frame
+                return dy, dx, gray
 
-                try:
-                    for t, (dy, dx, gray) in enumerate(ordered_map(pass1, T, width)):
-                        log(shift_line(dy, dx))
-                        shifts[p].append((dy, dx))
-                        if unaligned:
-                            unaligned.append(gray)
-                        progress(f"Pass 1: shifts (embryo {p})", t + 1, T)
+            try:
+                for t, (dy, dx, gray) in enumerate(ordered_map(pass1, T, width)):
+                    log(shift_line(dy, dx))
+                    shifts[p].append((dy, dx))
                     if unaligned:
-                        unaligned.close()
-                except BaseException:
-                    if unaligned:
-                        unaligned.cancel()
-                    raise
+                        unaligned.append(gray)
+                    progress(f"Pass 1: shifts (embryo {p})", t + 1, T)
+                if unaligned:
+                    unaligned.close()
+            except BaseException:
+                if unaligned:
+                    unaligned.cancel()
+                raise
 
-            dys = [s[0] for row in shifts for s in row]
-            dxs = [s[1] for row in shifts for s in row]
-            log("\nShift summary (pixels):")
-            log(f"  dy  min={min(dys):+.1f}  max={max(dys):+.1f}  mean={np.mean(dys):+.1f}")
-            log(f"  dx  min={min(dxs):+.1f}  max={max(dxs):+.1f}  mean={np.mean(dxs):+.1f}")
-            pad = covering_pad(dys, dxs)
-            log(f"\nCanvas padding:  top={pad[0]}  bottom={pad[1]}  left={pad[2]}  right={pad[3]}")
-            H, W = Y + pad[0] + pad[1], X + pad[2] + pad[3]
-            log(f"  Expanded canvas: Y={H}  X={W}")
+        dys = [s[0] for row in shifts for s in row]
+        dxs = [s[1] for row in shifts for s in row]
+        log("\nShift summary (pixels):")
+        log(f"  dy  min={min(dys):+.1f}  max={max(dys):+.1f}  mean={np.mean(dys):+.1f}")
+        log(f"  dx  min={min(dxs):+.1f}  max={max(dxs):+.1f}  mean={np.mean(dxs):+.1f}")
+        pad = (0, 0, 0, 0) if args.no_enlarge_canvas else covering_pad(dys, dxs)
+        log(f"\nCanvas padding:  top={pad[0]}  bottom={pad[1]}  left={pad[2]}  right={pad[3]}")
+        H, W = Y + pad[0] + pad[1], X + pad[2] + pad[3]
+        log(f"  Expanded canvas: Y={H}  X={W}")
 
-            log(f"\n--- Pass 2: aligning {P} embryo(s) × {T} timepoints ---")
-            for p in range(P):
-                log(f"\n  Embryo {p}/{P - 1}")
-                path = tiff_path(p)
-                log(f"    Saving {path.name}{' (streaming)' if args.low_memory else ''} ...")
-                aligned = movies(p, True, H, W)
+        log(f"\n--- Pass 2: aligning {P} embryo(s) × {T} timepoints ---")
+        for p in range(P):
+            log(f"\n  Embryo {p}/{P - 1}")
+            path = tiff_path(p)
+            log(f"    Saving {path.name}{' (streaming)' if args.low_memory else ''} ...")
+            aligned = movies(p, True, H, W)
 
-                def pass2(t, p=p, aligned=aligned):
-                    frame = cache.pop((p, t)) if cache is not None and (p, t) in cache else source.read_frame(t, p)
-                    dy, dx = shifts[p][t]
-                    out = backend.shift(frame, pad, dy, dx, args.shift_mode)
-                    gray = ChannelMovies.gray_frames(backend.max_project_all(out)) if aligned else None
-                    return out, gray
+            def pass2(t, p=p, aligned=aligned):
+                frame = cache.pop((p, t)) if cache is not None and (p, t) in cache else source.read_frame(t, p)
+                dy, dx = shifts[p][t]
+                out = backend.shift(frame, pad, dy, dx, args.shift_mode)
+                gray = ChannelMovies.gray_frames(backend.max_project_all(out)) if aligned else None
+                return out, gray
 
-                def frames(aligned=aligned, p=p):
-                    for t, (out, gray) in enumerate(ordered_map(pass2, T, width)):
-                        if aligned:
-                            aligned.append(gray)
-                        progress(f"Pass 2: aligning (embryo {p})", t + 1, T)
-                        yield out
-
-                try:
-                    save_ome_tiff(path, frames(), names, source.vox, source.period_s, shape=(T, C, Z, H, W),
-                                  dtype=np.uint16, bigtiff=True if args.low_memory else None)
+            def frames(aligned=aligned, p=p):
+                for t, (out, gray) in enumerate(ordered_map(pass2, T, width)):
                     if aligned:
-                        aligned.close()
-                except BaseException:
-                    if aligned:
-                        aligned.cancel()
-                    raise
-                log(f"    Saved {path.name}")
-                written.append(path)
-                for m in (movie_paths(p, True) + movie_paths(p, False)) if not args.no_movies else []:
-                    log(f"    Saved {m.name}")
-        else:
-            log(f"\nAligning {P} embryo(s) × {T} timepoints ...")
-            for p in range(P):
-                log(f"\n  Embryo {p}/{P - 1}")
-                path = tiff_path(p)
-                log(f"    Saving {path.name}{' (streaming)' if args.low_memory else ''} ...")
-                aligned, unaligned = movies(p, True, Y, X), movies(p, False, Y, X)
+                        aligned.append(gray)
+                    progress(f"Pass 2: aligning (embryo {p})", t + 1, T)
+                    yield out
 
-                def one_pass(t, p=p, aligned=aligned):
-                    frame = source.read_frame(t, p)
-                    dy, dx = compute_shift_xy(frame, params_at(t), backend)
-                    out = backend.shift(frame, (0, 0, 0, 0), dy, dx, args.shift_mode)
-                    a = u = None
-                    if aligned:
-                        a = ChannelMovies.gray_frames(backend.max_project_all(out))
-                        u = ChannelMovies.gray_frames(backend.max_project_all(frame))
-                    return dy, dx, out, a, u
-
-                def frames(p=p, aligned=aligned, unaligned=unaligned):
-                    for t, (dy, dx, out, a, u) in enumerate(ordered_map(one_pass, T, width)):
-                        log(shift_line(dy, dx))
-                        shifts[p].append((dy, dx))
-                        if aligned:
-                            aligned.append(a)
-                            unaligned.append(u)
-                        progress(f"Aligning timepoints (embryo {p})", t + 1, T)
-                        yield out
-
-                try:
-                    save_ome_tiff(path, frames(), names, source.vox, source.period_s, shape=(T, C, Z, Y, X),
-                                  dtype=np.uint16, bigtiff=True if args.low_memory else None)
-                    for m in (aligned, unaligned):
-                        if m:
-                            m.close()
-                except BaseException:
-                    for m in (aligned, unaligned):
-                        if m:
-                            m.cancel()
-                    raise
-                log(f"    Saved {path.name}")
-                written.append(path)
-                for m in (movie_paths(p, True) + movie_paths(p, False)) if not args.no_movies else []:
-                    log(f"    Saved {m.name}")
+            try:
+                save_ome_tiff(path, frames(), names, source.vox, source.period_s, shape=(T, C, Z, H, W),
+                              dtype=np.uint16, bigtiff=True if args.low_memory else None)
+                if aligned:
+                    aligned.close()
+            except BaseException:
+                if aligned:
+                    aligned.cancel()
+                raise
+            log(f"    Saved {path.name}")
+            written.append(path)
+            for m in (movie_paths(p, True) + movie_paths(p, False)) if not args.no_movies else []:
+                log(f"    Saved {m.name}")
     finally:
         source.close()
     return written, shifts

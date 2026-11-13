@@ -147,17 +147,14 @@ public final class AlignPipeline {
         ctx.log("  Output: \(input.outDir.path)")
 
         var result = AlignResult(outputDirectory: input.outDir)
-        // Image matching and z correction need the shift of every timepoint before anything is written, so they
-        // always take the path with two passes.
-        if options.enlargeCanvas || options.xyMatching != nil || options.zCorrection != nil {
-            try twoPass(cfg, input, &result)
-        } else {
-            try singlePass(cfg, input, &result)
-        }
+        try twoPass(cfg, input, &result)
         return result
     }
 
-    // MARK: Two-pass (default)
+    // MARK: Two passes
+
+    /// Pass 1 measures the shift of every timepoint. Pass 2 applies the shifts and writes the output. The canvas
+    /// size, the image matching and the z correction all need every shift before anything is written.
 
     private func twoPass(_ cfg: ThresholdConfig, _ input: Input, _ result: inout AlignResult) throws {
         let src = input.source
@@ -348,66 +345,5 @@ public final class AlignPipeline {
         case .embryoMask: return "the embryo mask"
         case .box(let x, let y, let w, let h): return "the box x \(x), y \(y), \(w) × \(h) px"
         }
-    }
-
-    // MARK: Single pass (--no_enlarge_canvas)
-
-    private func singlePass(_ cfg: ThresholdConfig, _ input: Input, _ result: inout AlignResult) throws {
-        let src = input.source
-        let T = src.t, P = src.positions
-        let width = pipelineWidth(frameBytes: src.frameBytes)
-        ctx.log("\nAligning \(P) embryo(s) × \(T) timepoints ...")
-        var shifts = [[(dy: Double, dx: Double)]](repeating: [], count: P)
-        for p in 0..<P {
-            ctx.log("\n  Embryo \(p)/\(P - 1)")
-            let url = tiffURL(input, p: p)
-            ctx.log("    Saving \(url.lastPathComponent)\(options.lowMemory ? " (streaming)" : "") ...")
-            let writer = try OMETIFFWriter(url: url, t: T, c: src.c, z: src.z, y: src.y, x: src.x, type: .uint16,
-                                           metadata: src.metadata(position: p), bigTIFF: options.lowMemory ? true : nil)
-            let aligned = try movies.map {
-                try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: true),
-                                  width: src.x, height: src.y, fps: options.fps)
-            }
-            let unaligned = try movies.map {
-                try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: false),
-                                  width: src.x, height: src.y, fps: options.fps)
-            }
-            struct Item { var r: Detection.Result; var out: Volume; var a: [[UInt8]]; var u: [[UInt8]] }
-            do {
-                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> Item in
-                    let frame = try src.readFrame(t: t, p: p)
-                    let params = try cfg.params(forTimepoint: t)
-                    let r = try Detection.computeShift(frame: frame, params: params, backend: self.backend)
-                    let out = try self.backend.shift(frame, pad: .none, dy: r.dy, dx: r.dx, mode: self.options.shiftMode)
-                    var a: [[UInt8]] = [], u: [[UInt8]] = []
-                    if self.movies != nil {
-                        a = ChannelMovies.grayFrames(try self.backend.maxProjectAll(out))
-                        u = ChannelMovies.grayFrames(try self.backend.maxProjectAll(frame))
-                    }
-                    return Item(r: r, out: out, a: a, u: u)
-                }, consume: { t, item in
-                    ctx.log(Masking.shiftLine(item.r.dy, item.r.dx))
-                    shifts[p].append((item.r.dy, item.r.dx))
-                    try writer.writeVolume(item.out)
-                    try aligned?.append(item.a)
-                    try unaligned?.append(item.u)
-                    ctx.progress("Aligning timepoints (embryo \(p))", t + 1, T)
-                })
-                try writer.finish()
-                try aligned?.finish()
-                try unaligned?.finish()
-            } catch {
-                aligned?.cancel()
-                unaligned?.cancel()
-                throw error
-            }
-            ctx.log("    Saved \(url.lastPathComponent)")
-            result.tiffs.append(url)
-            for m in [aligned, unaligned].compactMap({ $0 }) {
-                result.movies += m.urls
-                for u in m.urls { ctx.log("    Saved \(u.lastPathComponent)") }
-            }
-        }
-        result.shifts = shifts
     }
 }
