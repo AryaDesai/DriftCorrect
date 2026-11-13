@@ -13,6 +13,8 @@ import Foundation
 ///   TIFFs again afterwards. The frames and the contrast rule are the same.
 /// - The unaligned movie name is `{stem}_{channel}_unaligned.mp4` for both
 ///   canvas modes (the two-pass Python path produced a different name).
+/// - With `xyMatching` set, the xy shift comes from image matching between neighbouring timepoints, as `XYMatch`
+///   describes, in place of the centroid of the embryo mask.
 /// - With `zCorrection` set, z correction runs after the xy alignment, as `ZDrift` describes. The output is then
 ///   `{stem}_xy_z.ome.tif` and `{stem}_xy_z_shifts.csv`.
 public struct AlignOptions {
@@ -22,6 +24,8 @@ public struct AlignOptions {
     public var enlargeCanvas = true
     public var shiftMode: ShiftMode = .subpixel
     public var lowMemory = false
+    /// Settings of the xy alignment by image matching. When nil, the centroid of the embryo mask is centred.
+    public var xyMatching: XYMatchOptions?
     /// Settings of the z correction. When nil, only the xy alignment runs.
     public var zCorrection: ZCorrectionOptions?
     public init(yaml: URL) { self.yaml = yaml }
@@ -143,9 +147,9 @@ public final class AlignPipeline {
         ctx.log("  Output: \(input.outDir.path)")
 
         var result = AlignResult(outputDirectory: input.outDir)
-        // Z correction needs the shift of every timepoint before anything is written, so it always takes the
-        // path with two passes.
-        if options.enlargeCanvas || options.zCorrection != nil {
+        // Image matching and z correction need the shift of every timepoint before anything is written, so they
+        // always take the path with two passes.
+        if options.enlargeCanvas || options.xyMatching != nil || options.zCorrection != nil {
             try twoPass(cfg, input, &result)
         } else {
             try singlePass(cfg, input, &result)
@@ -160,57 +164,93 @@ public final class AlignPipeline {
         let T = src.t, P = src.positions
         let width = pipelineWidth(frameBytes: src.frameBytes)
         let cache = FrameCache(enabled: !options.lowMemory && FrameCache.fits(bytes: src.frameBytes * T * P))
-        let zopt = options.zCorrection
-        let zChannel = try zopt?.resolveChannel(names: src.metadata.channelNames, count: src.c,
-                                                fallback: cfg.parameters.channelIndex) ?? 0
         var trackers: [ZTracker] = []
-        let pixelSize = src.metadata.physicalSizeX
-        if zopt != nil {
-            let names = src.metadata.channelNames
-            ctx.log("  Z correction: channel \(zChannel < names.count ? names[zChannel] : "ch\(zChannel)") (index \(zChannel)), "
-                    + (src.metadata(position: 0).stageZ == nil ? "no stage positions in the file" : "starting from the stage positions"))
+        let zopt = options.zCorrection, xyopt = options.xyMatching
+        if let limit = zopt?.maximumStep, !limit.isFinite || limit <= 0 {
+            throw DCError("Maximum shift must be a positive number of slices")
         }
+        let names = src.metadata.channelNames
+        func name(_ c: Int) -> String { c < names.count ? names[c] : "ch\(c)" }
+        let zChannel = try zopt?.resolveChannel(names: names, count: src.c, fallback: cfg.parameters.channelIndex) ?? 0
+        let xyChannel = try xyopt.map {
+            try resolveChannel(index: $0.channelIndex, name: $0.channelName, names: names, count: src.c,
+                               fallback: cfg.parameters.channelIndex, label: "XY")
+        } ?? 0
+        // The embryo mask is needed for the centroid, and for image matching or z correction that follow the mask.
+        let needsMask = xyopt == nil || xyopt?.region == .embryoMask || zopt?.region == .embryoMask
+        ctx.log(xyopt == nil ? "  XY: centroid of the embryo mask"
+                             : "  XY: image matching of \(name(xyChannel)) (index \(xyChannel)), following \(describe(xyopt!.region))")
+        if let z = zopt { ctx.log("  Z correction: \(name(zChannel)) (index \(zChannel)), following \(describe(z.region))") }
 
         ctx.log("\n--- Pass 1: precomputing shifts ---")
         var shifts = [[(dy: Double, dx: Double)]](repeating: [], count: P)
+        struct Item {
+            var frame: Volume
+            var detection: Detection.Result?
+            var gray: [[UInt8]]
+            var xy: XYFrame?
+        }
         for p in 0..<P {
             ctx.log("\n  Embryo \(p)/\(P - 1):")
-            let tracker = zopt.map { ZTracker(options: $0, metadata: src.metadata(position: p)) }
+            let tracker = zopt.map { ZTracker(options: $0) }
             var zBox: ZBox?
-            if let z = zopt, case .box(let bx, let by, let bw, let bh) = z.region, T > 0 {
-                // The box was drawn on the reference timepoint before the alignment. Move it by the xy shift of
-                // that timepoint.
-                let rt = min(max(0, z.referenceTimepoint), T - 1)
-                let r = try Detection.computeShift(frame: try src.readFrame(t: rt, p: p), params: try cfg.params(forTimepoint: rt),
-                                                   backend: backend)
-                zBox = ZBox(x: bx + Shift.pyRound(r.dx), y: by + Shift.pyRound(r.dy), width: bw, height: bh)
-            }
+            // The previous timepoint for image matching, with its mask and its shift so far.
+            var previous: (frame: XYFrame, mask: Mask2D?)?
+            var position = (dy: 0.0, dx: 0.0)
             let unaligned = try movies.map {
                 try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: false),
                                   width: src.x, height: src.y, fps: options.fps)
             }
             do {
-                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> (Detection.Result, [[UInt8]], ZDescriptor?) in
+                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> Item in
                     let frame = try src.readFrame(t: t, p: p)
-                    let params = try cfg.params(forTimepoint: t)
-                    let r = try Detection.computeShift(frame: frame, params: params, backend: self.backend)
+                    let detection = needsMask ? try Detection.computeShift(frame: frame, params: try cfg.params(forTimepoint: t),
+                                                                           backend: self.backend) : nil
                     var gray: [[UInt8]] = []
-                    if unaligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(frame)) }
-                    // Reduce this timepoint to the data that z correction needs, measured on the frame centred in xy.
-                    var descriptor: ZDescriptor?
-                    if let z = zopt {
-                        descriptor = ZDrift.describe(frame: frame, channel: zChannel, shift: (Shift.pyRound(r.dy), Shift.pyRound(r.dx)),
-                                                     mask: z.region == .embryoMask ? r.mask : nil, box: zBox,
-                                                     pixelSizeUm: pixelSize, detectNuclei: z.useNuclei)
+                    var xy: XYFrame?
+                    if unaligned != nil {
+                        let projections = try self.backend.maxProjectAll(frame)
+                        gray = ChannelMovies.grayFrames(projections)
+                        if xyopt != nil { xy = XYMatch.prepare(projections[xyChannel]) }
+                    } else if xyopt != nil {
+                        xy = XYMatch.prepare(try self.backend.maxProjectZ(frame, channel: xyChannel))
                     }
                     cache.put(p * T + t, frame)
-                    return (r, gray, descriptor)
-                }, consume: { t, value in
-                    var line = Masking.shiftLine(value.0.dy, value.0.dx)
-                    if let d = value.2, let tr = tracker { line += "   " + ZDrift.line(tr.add(d)) }
+                    return Item(frame: frame, detection: detection, gray: gray, xy: xy)
+                }, consume: { t, item in
+                    // The xy shift of this timepoint.
+                    var line: String
+                    if let current = item.xy {
+                        var cost = 0.0
+                        if let prev = previous {
+                            let region = XYMatch.region(xyopt!.region, mask: prev.mask, position: position,
+                                                        width: current.width, height: current.height)
+                            let m = XYMatch.match(prev.frame, current, region: region)
+                            position.dy += Double(m.dy); position.dx += Double(m.dx); cost = m.cost
+                        }
+                        previous = (current, item.detection?.mask)
+                        line = Masking.shiftLine(position.dy, position.dx) + "  mismatch " + (cost.isFinite ? PyFormat.fmt("%.3f", cost) : "--")
+                        if !(cost <= ZDrift.weakCost) { line += "  [weak match]" }
+                    } else {
+                        position = (item.detection!.dy, item.detection!.dx)
+                        line = Masking.shiftLine(position.dy, position.dx)
+                    }
+                    shifts[p].append(position)
+                    // Z correction compares the frames after they are moved in xy. The box was drawn on the first
+                    // timepoint before the alignment, so it moves with the xy shift of that timepoint.
+                    if let z = zopt, let tr = tracker {
+                        let whole = (dy: Shift.pyRound(position.dy), dx: Shift.pyRound(position.dx))
+                        if t == 0, case .box(let bx, let by, let bw, let bh) = z.region {
+                            zBox = ZBox(x: bx + whole.dx, y: by + whole.dy, width: bw, height: bh)
+                        }
+                        let d = ZDrift.describe(frame: item.frame, channel: zChannel, shift: whole,
+                                                mask: z.region == .embryoMask ? item.detection?.mask : nil, box: zBox)
+                        line += "   " + ZDrift.line(tr.add(d))
+                    }
                     ctx.log(line)
-                    shifts[p].append((value.0.dy, value.0.dx))
-                    try unaligned?.append(value.1)
+                    var keep = true
+                    if let tracker = tracker, let limit = zopt?.maximumStep, t > 0 { keep = abs(tracker.steps[t].dz) <= limit }
+                    if keep { try unaligned?.append(item.gray) }
                     ctx.progress("Pass 1: shifts (embryo \(p))", t + 1, T)
                 })
                 try unaligned?.finish()
@@ -251,14 +291,16 @@ public final class AlignPipeline {
             let plan = plans.isEmpty ? nil : plans[p]
             var meta = src.metadata(position: p)
             if let pl = plan { meta = ZReport.correctedStage(meta, plan: pl) }
-            let writer = try OMETIFFWriter(url: url, t: T, c: src.c, z: src.z + (plan?.padLow ?? 0) + (plan?.padHigh ?? 0),
+            let kept = plan?.kept ?? Array(0..<T)
+            let writer = try OMETIFFWriter(url: url, t: kept.count, c: src.c, z: src.z + (plan?.padLow ?? 0) + (plan?.padHigh ?? 0),
                                            y: Y, x: X, type: .uint16, metadata: meta, bigTIFF: options.lowMemory ? true : nil)
             let aligned = try movies.map {
                 try ChannelMovies(factory: $0, urls: movieURLs(input, p: p, aligned: true),
                                   width: X, height: Y, fps: options.fps)
             }
             do {
-                try orderedPipeline(count: T, width: width, context: ctx, produce: { t -> (Volume, [[UInt8]]) in
+                try orderedPipeline(count: kept.count, width: width, context: ctx, produce: { index -> (Volume, [[UInt8]]) in
+                    let t = kept[index]
                     let frame = try cache.take(p * T + t) ?? src.readFrame(t: t, p: p)
                     let s = shifts[p][t]
                     var out = try self.backend.shift(frame, pad: pad, dy: s.dy, dx: s.dx, mode: self.options.shiftMode)
@@ -271,7 +313,7 @@ public final class AlignPipeline {
                 }, consume: { t, value in
                     try writer.writeVolume(value.0)
                     try aligned?.append(value.1)
-                    ctx.progress("Pass 2: aligning (embryo \(p))", t + 1, T)
+                    ctx.progress("Pass 2: aligning (embryo \(p))", t + 1, kept.count)
                 })
                 try writer.finish()
                 try aligned?.finish()
@@ -297,6 +339,14 @@ public final class AlignPipeline {
             for u in result.movies where u.lastPathComponent.hasSuffix("_unaligned.mp4") {
                 ctx.log("    Saved \(u.lastPathComponent)")
             }
+        }
+    }
+
+    func describe(_ r: FollowRegion) -> String {
+        switch r {
+        case .wholeFrame: return "the whole frame"
+        case .embryoMask: return "the embryo mask"
+        case .box(let x, let y, let w, let h): return "the box x \(x), y \(y), \(w) × \(h) px"
         }
     }
 

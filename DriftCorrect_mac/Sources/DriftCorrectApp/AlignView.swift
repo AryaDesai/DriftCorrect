@@ -2,7 +2,8 @@ import DCApple
 import DCCore
 import SwiftUI
 
-/// Front end for XY centroid alignment (centroid_align_xy_gui.py), with optional z correction after it.
+/// Front end for the xy alignment (centroid_align_xy_gui.py), by the mask centroid or by image matching, with
+/// optional z correction after it.
 struct AlignView: View {
     @ObservedObject var job: JobRunner
     @State private var yamlPath = ""
@@ -12,15 +13,29 @@ struct AlignView: View {
     @State private var shiftMode: ShiftMode = .subpixel
     @State private var lowMemory = true
 
+    /// The part of the image that image matching or z correction follows.
+    enum Follow: Int { case mask, box, whole }
+    /// The box being drawn, for the xy alignment or for the z correction.
+    enum BoxTarget: Int, Identifiable { case xy, z; var id: Int { rawValue } }
+    static let xyBoxPrompt = "Drag a box over cells that should stay still in xy. This is the first timepoint, before alignment."
+    static let zBoxPrompt = "Drag a box over cells that should stay in the same slice. This is the first timepoint, before alignment."
+    @State private var channels: [String] = []
+    @State private var source: URL?
+    @State private var boxTarget: BoxTarget?
+
+    // XY alignment by image matching
+    @State private var imageMatching = false
+    @State private var xyChannel = 0
+    @State private var xyFollow: Follow = .whole
+    @State private var xyBox: CGRect?
+
     // Z correction
-    enum ZFollow: Int { case mask, box, whole }
     @State private var zCorrect = false
-    @State private var zChannels: [String] = []
     @State private var zChannel = 0
-    @State private var zFollow: ZFollow = .mask
+    @State private var zFollow: Follow = .whole
     @State private var zBox: CGRect?
-    @State private var zSource: URL?
-    @State private var showBoxPicker = false
+    @State private var dropLargeShifts = false
+    @State private var maximumShift = 5.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -49,34 +64,32 @@ struct AlignView: View {
                 Toggle("Use low-memory streaming", isOn: $lowMemory)
                     .toggleStyle(.checkbox)
                     .help("Reads frames again in the second pass instead of keeping them in memory. Turn this on if the file is larger than the available RAM.")
+                Picker("XY method:", selection: $imageMatching) {
+                    Text("Mask centroid").tag(false)
+                    Text("Image matching").tag(true)
+                }
+                .help("Mask centroid centres the centroid of the embryo mask at every timepoint. Image matching compares each timepoint with the one before it and moves it to where the two images differ least.")
+                if imageMatching {
+                    channelPicker("XY channel:", selection: $xyChannel,
+                                  help: "The channel that image matching compares. A nuclear marker is the best choice.")
+                    followPicker(selection: $xyFollow, target: .xy, box: xyBox,
+                                 help: "The part of the image that must stay still in xy. To follow only some cells, draw a box over them.")
+                }
                 Toggle("Correct z drift (after xy)", isOn: $zCorrect)
                     .toggleStyle(.checkbox)
                     .help("Compares each timepoint with the previous one and moves whole slices so the tissue stays in the same slice. Empty slices fill the gaps. Writes …_xy_z.ome.tif and a table of the shifts.")
                 if zCorrect {
-                    if zChannels.isEmpty {
-                        LabeledContent("Z channel:") {
-                            Text("Select a threshold YAML to list the channels").foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Picker("Z channel:", selection: $zChannel) {
-                            ForEach(zChannels.indices, id: \.self) { Text(zChannels[$0]).tag($0) }
-                        }
-                        .help("The channel whose pattern is followed in z. A nuclear marker is the best choice.")
-                    }
-                    Picker("Follow:", selection: $zFollow) {
-                        Text("Embryo mask").tag(ZFollow.mask)
-                        Text("A box I draw").tag(ZFollow.box)
-                        Text("Whole frame").tag(ZFollow.whole)
-                    }
-                    .help("The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
-                    if zFollow == .box {
-                        LabeledContent("Box:") {
-                            HStack {
-                                Button("Draw box…") { showBoxPicker = true }.disabled(zSource == nil)
-                                Text(boxLabel).foregroundStyle(.secondary)
-                            }
+                    channelPicker("Z channel:", selection: $zChannel,
+                                  help: "The channel whose pattern is followed in z. A nuclear marker is the best choice.")
+                    Toggle("Drop time points with large shifts", isOn: $dropLargeShifts)
+                        .toggleStyle(.checkbox)
+                    if dropLargeShifts {
+                        LabeledContent("Maximum shift (slices):") {
+                            TextField("", value: $maximumShift, format: .number).frame(width: 80)
                         }
                     }
+                    followPicker(selection: $zFollow, target: .z, box: zBox,
+                                 help: "The part of the image that must stay in the same slice. To follow only some cells, draw a box over cells that should not move in z.")
                 }
             }
             .disabled(job.isRunning)
@@ -96,19 +109,64 @@ struct AlignView: View {
         .onChange(of: yamlPath) { _, _ in loadChannels() }
         .onChange(of: useND2) { _, _ in loadChannels() }
         .onChange(of: zCorrect) { _, on in if on { loadChannels() } }
-        .sheet(isPresented: $showBoxPicker) {
-            if let url = zSource { ZBoxPicker(source: url, channel: zChannel, box: $zBox) }
+        .onChange(of: imageMatching) { _, on in if on { loadChannels() } }
+        .sheet(item: $boxTarget) { target in
+            if let url = source {
+                if target == .xy { BoxPicker(source: url, channel: xyChannel, prompt: Self.xyBoxPrompt, box: $xyBox) }
+                else { BoxPicker(source: url, channel: zChannel, prompt: Self.zBoxPrompt, box: $zBox) }
+            }
         }
     }
 
-    private var boxLabel: String {
-        guard let b = zBox else { return zSource == nil ? "Select a threshold YAML first" : "No box yet" }
+    /// A picker of the channels of the file that the YAML file points to.
+    @ViewBuilder
+    private func channelPicker(_ label: String, selection: Binding<Int>, help: String) -> some View {
+        if channels.isEmpty {
+            LabeledContent(label) { Text("Select a threshold YAML to list the channels").foregroundStyle(.secondary) }
+        } else {
+            Picker(label, selection: selection) {
+                ForEach(channels.indices, id: \.self) { Text(channels[$0]).tag($0) }
+            }
+            .help(help)
+        }
+    }
+
+    /// A picker of the region to follow, with a button to draw the box when the box is chosen.
+    @ViewBuilder
+    private func followPicker(selection: Binding<Follow>, target: BoxTarget, box: CGRect?, help: String) -> some View {
+        Picker("Follow:", selection: selection) {
+            Text("Whole frame").tag(Follow.whole)
+            Text("Embryo mask").tag(Follow.mask)
+            Text("A box I draw").tag(Follow.box)
+        }
+        .help(help)
+        if selection.wrappedValue == .box {
+            LabeledContent("Box:") {
+                HStack {
+                    Button("Draw box…") { boxTarget = target }.disabled(source == nil)
+                    Text(boxLabel(box)).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func boxLabel(_ box: CGRect?) -> String {
+        guard let b = box else { return source == nil ? "Select a threshold YAML first" : "No box yet" }
         return "x \(Int(b.minX)), y \(Int(b.minY)), \(Int(b.width)) × \(Int(b.height)) px"
+    }
+
+    /// Turn the choice of region into the setting of the pipeline. It is nil when a box is needed but none is drawn.
+    private func region(_ follow: Follow, box: CGRect?) -> FollowRegion? {
+        switch follow {
+        case .mask: return .embryoMask
+        case .whole: return .wholeFrame
+        case .box: return box.map { .box(x: Int($0.minX), y: Int($0.minY), width: Int($0.width), height: Int($0.height)) }
+        }
     }
 
     /// Find the image file that the YAML file points to and list its channels.
     private func loadChannels() {
-        guard zCorrect else { return }
+        guard zCorrect || imageMatching else { return }
         let yaml = expand(yamlPath)
         let nd2 = useND2
         Task.detached(priority: .userInitiated) {
@@ -129,10 +187,11 @@ struct AlignView: View {
             let choice = nuclear ?? min(threshold, max(0, names.count - 1))
             let foundNames = names, foundFile = file
             await MainActor.run {
-                if foundFile != zSource { zBox = nil }
-                zSource = foundFile
-                if foundNames != zChannels {
-                    zChannels = foundNames
+                if foundFile != source { xyBox = nil; zBox = nil }
+                source = foundFile
+                if foundNames != channels {
+                    channels = foundNames
+                    xyChannel = choice
                     zChannel = choice
                 }
             }
@@ -160,16 +219,26 @@ struct AlignView: View {
         o.enlargeCanvas = enlargeCanvas
         o.shiftMode = shiftMode
         o.lowMemory = lowMemory
-        if zCorrect {
-            var z = ZCorrectionOptions()
-            if !zChannels.isEmpty { z.channelIndex = zChannel }
-            switch zFollow {
-            case .mask: z.region = .embryoMask
-            case .whole: z.region = .wholeFrame
-            case .box:
-                guard let b = zBox else { showAlert("No box", "Draw a box over the cells to follow, or choose another option."); return }
-                z.region = .box(x: Int(b.minX), y: Int(b.minY), width: Int(b.width), height: Int(b.height))
+        if imageMatching {
+            var m = XYMatchOptions()
+            if !channels.isEmpty { m.channelIndex = xyChannel }
+            guard let r = region(xyFollow, box: xyBox) else {
+                showAlert("No box", "Draw a box over the cells to follow in xy, or choose another option."); return
             }
+            m.region = r
+            o.xyMatching = m
+        }
+        if zCorrect {
+            if dropLargeShifts && (!maximumShift.isFinite || maximumShift <= 0) {
+                showAlert("Invalid maximum shift", "Enter a positive number of slices."); return
+            }
+            var z = ZCorrectionOptions()
+            z.maximumStep = dropLargeShifts ? maximumShift : nil
+            if !channels.isEmpty { z.channelIndex = zChannel }
+            guard let r = region(zFollow, box: zBox) else {
+                showAlert("No box", "Draw a box over the cells to follow in z, or choose another option."); return
+            }
+            z.region = r
             o.zCorrection = z
         }
         let options = o
@@ -184,10 +253,11 @@ struct AlignView: View {
     }
 }
 
-/// Sheet for drawing the box that z correction follows, on the max projection of the first timepoint.
-struct ZBoxPicker: View {
+/// Sheet for drawing the box that image matching or z correction follows, on the max projection of the first timepoint.
+struct BoxPicker: View {
     let source: URL
     let channel: Int
+    let prompt: String
     @Binding var box: CGRect?
     @Environment(\.dismiss) private var dismiss
     @State private var image: CGImage?
@@ -196,7 +266,7 @@ struct ZBoxPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Drag a box over cells that should stay in the same slice. This is the first timepoint, before alignment.")
+            Text(prompt)
             Group {
                 if let img = image {
                     GeometryReader { geo in

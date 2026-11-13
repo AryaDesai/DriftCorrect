@@ -25,7 +25,7 @@ struct MaskView: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Find threshold for masking PSM").font(.title3.bold())
-            Text("Red overlay = mask  |  + = centroid").foregroundStyle(.secondary)
+            Text("Overlay = mask (class colours in Multi-Level Otsu)  |  + = centroid").foregroundStyle(.secondary)
             PathField(placeholder: "ND2 or TIF file", path: $model.path, types: [.nd2, .tiff]) { model.load() }
             Button("Load") { model.load() }
 

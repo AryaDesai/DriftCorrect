@@ -9,10 +9,12 @@ struct ZCorrectView: View {
     @State private var yamlPath = ""
     @State private var channels: [String] = []
     @State private var channel = 0
-    @State private var follow: AlignView.ZFollow = .whole
+    @State private var follow: AlignView.Follow = .whole
     @State private var box: CGRect?
     @State private var source: URL?
     @State private var showBoxPicker = false
+    @State private var dropLargeShifts = false
+    @State private var maximumShift = 5.0
     @State private var enlargeStack = true
     @State private var lowMemory = true
 
@@ -33,9 +35,9 @@ struct ZCorrectView: View {
                     .help("The channel whose pattern is followed in z. A nuclear marker is the best choice.")
                 }
                 Picker("Follow:", selection: $follow) {
-                    Text("Whole frame").tag(AlignView.ZFollow.whole)
-                    Text("A box I draw").tag(AlignView.ZFollow.box)
-                    Text("Embryo mask").tag(AlignView.ZFollow.mask)
+                    Text("Whole frame").tag(AlignView.Follow.whole)
+                    Text("A box I draw").tag(AlignView.Follow.box)
+                    Text("Embryo mask").tag(AlignView.Follow.mask)
                 }
                 .help("The part of the image that must stay in the same slice. The embryo mask needs the threshold YAML file from the Mask tool.")
                 if follow == .box {
@@ -49,6 +51,13 @@ struct ZCorrectView: View {
                 if follow == .mask {
                     LabeledContent("Threshold YAML:") {
                         PathField(placeholder: "Select a threshold YAML file", path: $yamlPath, types: [.yaml, .yml])
+                    }
+                }
+                Toggle("Drop time points with large shifts", isOn: $dropLargeShifts)
+                    .toggleStyle(.checkbox)
+                if dropLargeShifts {
+                    LabeledContent("Maximum shift (slices):") {
+                        TextField("", value: $maximumShift, format: .number).frame(width: 80)
                     }
                 }
                 Toggle("Add empty slices so that no slice is lost", isOn: $enlargeStack)
@@ -73,7 +82,7 @@ struct ZCorrectView: View {
         .frame(minWidth: 680, minHeight: 520)
         .onChange(of: filePath) { _, _ in loadChannels() }
         .sheet(isPresented: $showBoxPicker) {
-            if let url = source { ZBoxPicker(source: url, channel: channel, box: $box) }
+            if let url = source { BoxPicker(source: url, channel: channel, prompt: AlignView.zBoxPrompt, box: $box) }
         }
     }
 
@@ -111,7 +120,11 @@ struct ZCorrectView: View {
             showAlert("Invalid image file", "Select an existing OME-TIFF or ND2 file.")
             return
         }
+        if dropLargeShifts && (!maximumShift.isFinite || maximumShift <= 0) {
+            showAlert("Invalid maximum shift", "Enter a positive number of slices."); return
+        }
         var o = ZCorrectOptions(input: file)
+        o.z.maximumStep = dropLargeShifts ? maximumShift : nil
         o.enlargeStack = enlargeStack
         o.lowMemory = lowMemory
         if !channels.isEmpty { o.z.channelIndex = channel }

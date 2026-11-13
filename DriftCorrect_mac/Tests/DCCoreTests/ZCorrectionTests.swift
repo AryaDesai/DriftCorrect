@@ -56,18 +56,24 @@ final class ZCorrectionTests: XCTestCase {
         return planes.map { $0.map { UInt16(min(65535, max(0, $0))) } }
     }()
 
-    /// One timepoint whose first slice is scene plane `base + offset`.
-    func frame(offset: Int) -> Volume {
-        let n = Self.size * Self.size
-        let v = Volume(c: 1, z: Self.slices, y: Self.size, x: Self.size, type: .uint16)
+    /// One timepoint whose first slice is scene plane `base + offset`. The scene is moved by (dy, dx) pixels in xy,
+    /// and pixels that the move uncovers are 0.
+    func frame(offset: Int, dy: Int = 0, dx: Int = 0) -> Volume {
+        let n = Self.size
+        let v = Volume(c: 1, z: Self.slices, y: n, x: n, type: .uint16, zeroed: true)
         for z in 0..<Self.slices {
-            Self.scene[Self.base + offset + z].withUnsafeBytes { v.planePointer(c: 0, z: z).copyMemory(from: $0.baseAddress!, byteCount: n * 2) }
+            let plane = Self.scene[Self.base + offset + z]
+            let out = v.planePointer(c: 0, z: z).assumingMemoryBound(to: UInt16.self)
+            for y in 0..<n where y - dy >= 0 && y - dy < n {
+                for x in 0..<n where x - dx >= 0 && x - dx < n { out[y * n + x] = plane[(y - dy) * n + x - dx] }
+            }
         }
         return v
     }
 
-    /// Write a movie with the given stack offsets. With `stage`, the offsets are also recorded as stage positions.
-    func writeMovie(_ name: String, offsets: [Int], stage: Bool) throws -> URL {
+    /// Write a movie with the given stack offsets and xy moves. With `stage`, the offsets are also recorded as stage
+    /// positions.
+    func writeMovie(_ name: String, offsets: [Int], moves: [(Int, Int)]? = nil, stage: Bool) throws -> URL {
         let url = tmp.appendingPathComponent(name)
         var meta = ImageMetadata(channelNames: ["nuc"], physicalSizeX: 0.43, physicalSizeY: 0.43, physicalSizeZ: 2, timeIncrement: 240)
         if stage {
@@ -75,7 +81,7 @@ final class ZCorrectionTests: XCTestCase {
             meta.stageZStep = 2
         }
         let w = try OMETIFFWriter(url: url, t: offsets.count, c: 1, z: Self.slices, y: Self.size, x: Self.size, type: .uint16, metadata: meta)
-        for o in offsets { try w.writeVolume(frame(offset: o)) }
+        for (t, o) in offsets.enumerated() { try w.writeVolume(frame(offset: o, dy: moves?[t].0 ?? 0, dx: moves?[t].1 ?? 0)) }
         try w.finish()
         return url
     }
@@ -126,19 +132,17 @@ final class ZCorrectionTests: XCTestCase {
         let expected: [Double] = [0, 0, -3, 0, 5, -1]
         for stage in [false, true] {
             let src = try TIFFSource(url: try writeMovie("m\(stage).ome.tif", offsets: offsets, stage: stage))
-            for region in [ZRegion.wholeFrame, .box(x: 50, y: 50, width: 64, height: 64)] {
+            for region in [FollowRegion.wholeFrame, .box(x: 50, y: 50, width: 64, height: 64)] {
                 var o = ZCorrectionOptions()
                 o.region = region
                 let r = try ZMeasure.run(source: src, options: o, csv: nil, context: .silent())
                 for (t, e) in expected.enumerated() {
                     XCTAssertEqual(r.steps[t].dz, e, accuracy: 0.3, "t\(t) stage=\(stage) \(region)")
                     XCTAssertEqual(r.steps[t].flag, "", "t\(t)")
-                    if stage && t > 0 { XCTAssertEqual(r.steps[t].stage!, e, accuracy: 1e-9) }
                 }
                 XCTAssertEqual(r.plan.shift, offsets.map { $0 - offsets[0] })
                 XCTAssertEqual(r.plan.padLow, 2)
                 XCTAssertEqual(r.plan.padHigh, 3)
-                XCTAssertGreaterThan(r.steps[1].agreeing, 10, "nuclei should be matched (\(region))")
             }
             // After placing, every timepoint shows the same scene plane in a given output slice.
             let r = try ZMeasure.run(source: src, options: wholeFrame, csv: nil, context: .silent())
@@ -151,18 +155,12 @@ final class ZCorrectionTests: XCTestCase {
         }
     }
 
-    func testStageCoversJumpWithoutOverlap() throws {
-        // A jump of 11 slices leaves 3 of the 14 slices in common. That is too few to compare, so the stage value is
-        // used as it is.
-        let offsets = [0, 11, 11]
-        let withStage = try ZMeasure.run(source: TIFFSource(url: try writeMovie("jump.ome.tif", offsets: offsets, stage: true)),
-                                         options: wholeFrame, csv: tmp.appendingPathComponent("jump.csv"), context: .silent())
-        XCTAssertEqual(withStage.steps[1].dz, -11, accuracy: 1e-9)
-        XCTAssertTrue(withStage.steps[1].flag.hasPrefix("stage only"))
-        XCTAssertEqual(withStage.steps[2].dz, 0, accuracy: 0.3)
-        XCTAssertEqual(withStage.plan.shift, [0, 11, 11])
-        let csv = try String(contentsOf: tmp.appendingPathComponent("jump.csv"), encoding: .utf8)
-        XCTAssertEqual(csv.split(separator: "\n").count, 4)
+    func testEmptyRegionIsFlagged() {
+        let empty = Volume(c: 1, z: Self.slices, y: Self.size, x: Self.size, type: .uint16, zeroed: true)
+        let blank = ZDrift.describe(frame: empty, channel: 0)
+        let step = ZDrift.match(blank, blank)
+        XCTAssertEqual(step.dz, 0)
+        XCTAssertEqual(step.flag, "no data in the region")
     }
 
     func testCorrectZWithoutXYAlignment() throws {
@@ -184,7 +182,7 @@ final class ZCorrectionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: r.csv.path))
 
         // The embryo mask cannot be followed without a threshold YAML file.
-        o.z = ZCorrectionOptions()
+        o.z.region = .embryoMask
         XCTAssertThrowsError(try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent()))
         // Without extra slices the stack keeps its depth.
         o.z = wholeFrame
@@ -207,6 +205,7 @@ final class ZCorrectionTests: XCTestCase {
         """.write(to: yaml, atomically: true, encoding: .utf8)
         var opts = AlignOptions(yaml: yaml)
         opts.zCorrection = ZCorrectionOptions()
+        opts.zCorrection?.region = .embryoMask
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(r.zPlans[0].shift, [0, 0, 3, 3, -2])
         let out = try TIFFStack(url: tmp.appendingPathComponent("aligned_P0_concat/P0_concat_xy_z.ome.tif"))
@@ -225,5 +224,155 @@ final class ZCorrectionTests: XCTestCase {
         opts.zCorrection = nil
         _ = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(try TIFFStack(url: tmp.appendingPathComponent("aligned_P0_concat/P0_concat_xy.ome.tif")).z, Self.slices)
+    }
+    func testDroppedFramesPreserveCumulativeShiftsAndCoverage() {
+        let p = ZDrift.plan(steps: [0, 6, 0, 1, -7, 0], maximumStep: 5)
+        XCTAssertEqual(p.kept, [0, 2, 3, 5])
+        XCTAssertEqual(p.shift, [0, -6, -6, -7, 0, 0])
+        let spike = ZDrift.plan(steps: [0, 8, -8, 0], maximumStep: 5)
+        XCTAssertEqual(spike.kept, [0, 3])
+        XCTAssertEqual(spike.padLow, 0)
+        XCTAssertEqual(spike.padHigh, 0)
+        let lines = ZReport.summary(steps: [ZStep(), ZStep(), ZStep(), ZStep()], plan: spike, z: 14)
+        XCTAssertEqual(Array(lines.suffix(14)), (1...14).map { "\($0)" + ($0 < 14 ? "," : "") })
+        XCTAssertEqual(ZDrift.plan(steps: [0, 5], maximumStep: 5).kept, [0, 1])
+    }
+
+    func testDropOutputKeepsOriginalTimesAndMetadata() throws {
+        let tif = try writeMovie("drop.ome.tif", offsets: [0, 0, 3, 3, -2, -1], stage: true)
+        var options = ZCorrectOptions(input: tif)
+        options.z = wholeFrame
+        options.z.maximumStep = 2
+        for lowMemory in [false, true] {
+            options.lowMemory = lowMemory
+            let result = try ZCorrectPipeline.run(options: options, backend: CPUBackend(), context: .silent())
+            XCTAssertEqual(result.plan.kept, [0, 1, 3, 5])
+            XCTAssertEqual(result.plan.shift, [0, 0, 3, 3, -2, -1])
+            let stack = try TIFFStack(url: result.tiff)
+            XCTAssertEqual(stack.t, 4)
+            XCTAssertEqual(stack.z, 18)
+            let first = try stack.readFrame(0).floatPlane(result.plan.padLow + 6)
+            for t in 1..<stack.t { XCTAssertEqual(try stack.readFrame(t).floatPlane(result.plan.padLow + 6), first) }
+            let xml = try XCTUnwrap(stack.omeXML)
+            XCTAssertTrue(xml.contains("DeltaT=\"720.0\""))
+            XCTAssertTrue(xml.contains("DeltaT=\"1200.0\""))
+            let csv = try String(contentsOf: result.csv, encoding: .utf8)
+            XCTAssertTrue(csv.contains("output_t"))
+            XCTAssertEqual(csv.components(separatedBy: "dropped (large shift)").count - 1, 2)
+        }
+    }
+
+    func testAlignmentDropsTIFFAndMovieFramesTogether() throws {
+        final class Writer: MovieWriter {
+            var count = 0
+            func append(gray: [UInt8]) throws { count += 1 }
+            func finish() throws {}
+            func cancel() {}
+        }
+        final class Factory: MovieWriterFactory {
+            var writers: [Writer] = []
+            func makeWriter(url: URL, width: Int, height: Int, fps: Double) throws -> MovieWriter {
+                let writer = Writer(); writers.append(writer); return writer
+            }
+        }
+        let tif = try writeMovie("P0_concat.ome.tif", offsets: [0, 0, 3, 3, -2, -1], stage: true)
+        let yaml = tmp.appendingPathComponent("threshold.yaml")
+        try """
+        parameters:
+          channel_index: 0
+          sigma: 8
+          percentile: 60.0
+        source:
+          file: \(tif.path)
+        """.write(to: yaml, atomically: true, encoding: .utf8)
+        for enlarge in [false, true] {
+            var options = AlignOptions(yaml: yaml)
+            options.zCorrection = ZCorrectionOptions()
+            options.zCorrection?.maximumStep = 2
+            options.enlargeCanvas = enlarge
+            let factory = Factory()
+            let result = try AlignPipeline(options: options, backend: CPUBackend(), movies: factory, context: .silent()).run()
+            XCTAssertEqual(result.zPlans[0].kept, [0, 1, 3, 5])
+            XCTAssertEqual(try TIFFStack(url: result.tiffs[0]).t, 4)
+            XCTAssertEqual(factory.writers.map { $0.count }, [4, 4])
+        }
+    }
+
+    /// A threshold YAML file whose mask is the bright disc of the scene.
+    func writeYAML(for tif: URL) throws -> URL {
+        let yaml = tmp.appendingPathComponent("P0_nuc_threshold.yaml")
+        try """
+        parameters:
+          channel: nuc
+          channel_index: 0
+          sigma: 8
+          percentile: 60.0
+        source:
+          file: \(tif.path)
+        """.write(to: yaml, atomically: true, encoding: .utf8)
+        return yaml
+    }
+
+    func testXYMatchFindsLargeJumps() {
+        let a = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0).floatPlane(6)))
+        for (dy, dx) in [(0, 0), (3, -2), (-17, 25), (38, -41)] {
+            let b = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0, dy: dy, dx: dx).floatPlane(6)))
+            let m = XYMatch.match(a, b)
+            XCTAssertEqual(m.dy, -dy, "move \(dy), \(dx)")
+            XCTAssertEqual(m.dx, -dx, "move \(dy), \(dx)")
+            XCTAssertLessThan(m.cost, 0.1)
+        }
+    }
+
+    func testAlignByImageMatching() throws {
+        let moves = [(0, 0), (4, -3), (9, 2), (-12, 15), (-10, 14)]
+        let tif = try writeMovie("P0_concat.ome.tif", offsets: [0, 0, 0, 0, 0], moves: moves, stage: false)
+        let yaml = try writeYAML(for: tif)
+        for region in [FollowRegion.wholeFrame, .embryoMask, .box(x: 40, y: 40, width: 80, height: 80)] {
+            var opts = AlignOptions(yaml: yaml)
+            opts.xyMatching = XYMatchOptions()
+            opts.xyMatching?.region = region
+            let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
+            // Every timepoint moves back onto the first one.
+            for (t, m) in moves.enumerated() {
+                XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0), "t\(t) \(region)")
+                XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1), "t\(t) \(region)")
+            }
+            // In the output, every timepoint shows the scene in the same place, apart from the pixels that its move
+            // uncovered.
+            let out = try TIFFStack(url: r.tiffs[0])
+            let first = try out.readFrame(0).floatPlane(6)
+            for t in 1..<moves.count {
+                let plane = try out.readFrame(t).floatPlane(6)
+                var same = 0, compared = 0
+                for i in plane.indices where plane[i] > 0 && first[i] > 0 { compared += 1; if plane[i] == first[i] { same += 1 } }
+                XCTAssertGreaterThan(compared, 10_000, "t\(t) \(region)")
+                XCTAssertEqual(same, compared, "t\(t) \(region)")
+            }
+        }
+    }
+
+    func testImageMatchingWithZCorrection() throws {
+        let offsets = [0, 2, 2, -1]
+        let moves = [(0, 0), (6, -5), (-8, 11), (-7, 12)]
+        let tif = try writeMovie("P0_concat.ome.tif", offsets: offsets, moves: moves, stage: false)
+        var opts = AlignOptions(yaml: try writeYAML(for: tif))
+        opts.xyMatching = XYMatchOptions()
+        opts.zCorrection = ZCorrectionOptions()
+        let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
+        XCTAssertEqual(r.zPlans[0].shift, offsets)
+        for (t, m) in moves.enumerated() { XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0)); XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1)) }
+        // After both corrections, a given output slice shows the same scene plane at every timepoint, apart from
+        // the pixels that the xy move uncovered.
+        let out = try TIFFStack(url: r.tiffs[0])
+        let k = r.zPlans[0].padLow + 6
+        let first = try out.readFrame(0).floatPlane(k)
+        for t in 1..<offsets.count {
+            let plane = try out.readFrame(t).floatPlane(k)
+            var same = 0, compared = 0
+            for i in plane.indices where plane[i] > 0 && first[i] > 0 { compared += 1; if plane[i] == first[i] { same += 1 } }
+            XCTAssertGreaterThan(compared, 10_000, "t\(t)")
+            XCTAssertEqual(same, compared, "t\(t)")
+        }
     }
 }

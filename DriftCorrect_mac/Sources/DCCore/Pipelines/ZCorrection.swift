@@ -7,64 +7,34 @@ public struct ZCorrectionOptions: Sendable {
     /// oscillates changes from one timepoint to the next.
     public var channelIndex: Int?
     public var channelName: String?
-    public var region: ZRegion = .embryoMask
+    public var region: FollowRegion = .wholeFrame
     /// The timepoint whose slices stay where they are. Every other timepoint moves to match it.
     /// The app and the command line do not show this setting yet, so change it here.
     public var referenceTimepoint = 0
     /// The dead band of the rounding to whole slices, which `ZDrift.plan` describes.
     public var deadBand = 0.15
-    /// Start from the stage z positions that the microscope recorded, when the file has them.
-    public var useStagePositions = true
-    /// Refine the estimate from the images by matching individual nuclei.
-    public var useNuclei = true
+    /// Leave out timepoints whose movement from the timepoint before them exceeds this many slices.
+    public var maximumStep: Double?
 
     public init() {}
 
-    /// Return the index of the channel to follow. `fallback` is used when no channel was chosen.
     func resolveChannel(names: [String], count: Int, fallback: Int) throws -> Int {
-        if let i = channelIndex {
-            guard i >= 0 && i < count else { throw DCError("Z channel index \(i) is out of range (the data has \(count) channel(s))") }
-            return i
-        }
-        if let n = channelName, !n.isEmpty {
-            guard let i = names.prefix(count).firstIndex(of: n) else {
-                throw DCError("Z channel \"\(n)\" not found. The channels are: \(names.prefix(count).joined(separator: ", "))")
-            }
-            return i
-        }
-        return fallback
+        try DCCore.resolveChannel(index: channelIndex, name: channelName, names: names, count: count, fallback: fallback, label: "Z")
     }
 }
 
 /// Follows one embryo through time. The descriptor of each timepoint is added in the order of time.
 final class ZTracker {
     let options: ZCorrectionOptions
-    let stageZ: [Double]?
-    let stageStep: Double?
     private var previous: ZDescriptor?
     private(set) var steps: [ZStep] = []
 
-    init(options: ZCorrectionOptions, metadata: ImageMetadata) {
-        self.options = options
-        let usable = options.useStagePositions && (metadata.stageZStep ?? 0) != 0
-        stageZ = usable ? metadata.stageZ : nil
-        stageStep = usable ? metadata.stageZStep : nil
-    }
-
-    /// Return the number of slices the tissue appears to move between timepoint t - 1 and timepoint t when only the
-    /// stage moved. When the stack starts higher by some distance, the same tissue sits lower in the stack by that
-    /// distance divided by the z step.
-    func stageEstimate(_ t: Int) -> Double? {
-        guard let z = stageZ, let step = stageStep, t > 0, t < z.count else { return nil }
-        return -(z[t] - z[t - 1]) / step + 0   // Adding 0 turns a negative zero into zero for the log.
-    }
+    init(options: ZCorrectionOptions) { self.options = options }
 
     /// Compare the timepoint with the previous one and store the result.
     @discardableResult
     func add(_ d: ZDescriptor) -> ZStep {
-        let t = steps.count
-        var step = ZStep()
-        if let p = previous { step = ZDrift.match(p, d, stage: stageEstimate(t), useNuclei: options.useNuclei) }
+        let step = previous.map { ZDrift.match($0, d) } ?? ZStep()
         steps.append(step)
         previous = d
         return step
@@ -72,7 +42,8 @@ final class ZTracker {
 
     /// Return the shift of every timepoint in whole slices.
     func plan(pad: Bool) -> ZPlan {
-        ZDrift.plan(steps: steps.map { $0.dz }, reference: options.referenceTimepoint, deadBand: options.deadBand, pad: pad)
+        ZDrift.plan(steps: steps.map { $0.dz }, reference: options.referenceTimepoint, deadBand: options.deadBand, pad: pad,
+                    maximumStep: options.maximumStep)
     }
 }
 
@@ -80,11 +51,13 @@ public enum ZReport {
     /// Build the table with one row for each timepoint. A row holds what was measured and the shift that was applied.
     public static func csv(steps: [ZStep], plan: ZPlan, stageZ: [Double]?) -> String {
         func f(_ v: Double?, _ digits: Int = 3) -> String { v.map { String(format: "%.\(digits)f", $0) } ?? "" }
-        var out = "t,stage_z_um,dz_used,dz_stage,dz_image,dz_nuclei,image_mismatch,nuclei_agreeing,nuclei_share,position_slices,shift_slices,flag\n"
+        var out = "t,output_t,stage_z_um,dz,mismatch,position_slices,shift_slices,flag\n"
+        let outputIndices = Dictionary(uniqueKeysWithValues: plan.kept.enumerated().map { ($0.element, $0.offset) })
         for (t, s) in steps.enumerated() {
             let stage = stageZ.flatMap { t < $0.count ? $0[t] : nil }
-            out += "\(t),\(f(stage, 2)),\(f(s.dz)),\(f(s.stage)),\(f(s.image)),\(f(s.nuclei)),\(f(s.cost.isFinite ? s.cost : nil)),"
-            out += "\(s.agreeing),\(f(s.share)),\(f(plan.position[t])),\(plan.shift[t]),\(s.flag)\n"
+            let flag = [s.flag, outputIndices[t] == nil ? "dropped (large shift)" : ""].filter { !$0.isEmpty }.joined(separator: "; ")
+            out += "\(t),\(outputIndices[t].map(String.init) ?? ""),\(f(stage, 2)),\(f(s.dz)),\(f(s.cost.isFinite ? s.cost : nil)),"
+            out += "\(f(plan.position[t])),\(plan.shift[t]),\(flag)\n"
         }
         return out
     }
@@ -92,11 +65,24 @@ public enum ZReport {
     /// Build the lines that the log shows after all timepoints are measured.
     public static func summary(steps: [ZStep], plan: ZPlan, z: Int) -> [String] {
         let flagged = steps.enumerated().filter { !$0.element.flag.isEmpty }
-        var lines = [PyFormat.fmt("  z position  min=%+.1f  max=%+.1f slices", plan.position.min() ?? 0, plan.position.max() ?? 0),
+        let retainedPositions = plan.kept.map { plan.position[$0] }
+        var lines = [PyFormat.fmt("  z position  min=%+.1f  max=%+.1f slices", retainedPositions.min() ?? 0, retainedPositions.max() ?? 0),
                      "  Empty slices added:  low=\(plan.padLow)  high=\(plan.padHigh)   Z: \(z) -> \(z + plan.padLow + plan.padHigh)"]
         if !flagged.isEmpty {
             lines.append("  \(flagged.count) timepoint(s) need a look: " + flagged.prefix(12).map { "t\($0.offset) (\($0.element.flag))" }.joined(separator: ", ")
                          + (flagged.count > 12 ? ", …" : ""))
+        }
+        let retainedShifts = plan.kept.map { plan.shift[$0] }
+        let retained = Set(plan.kept)
+        let dropped = steps.indices.filter { !retained.contains($0) }
+        if !dropped.isEmpty { lines.append("Dropped timepoints (0-based): " + dropped.map(String.init).joined(separator: ", ")) }
+        let firstSlice = max(0, plan.padLow + (retainedShifts.max() ?? 0))
+        let endSlice = min(z + plan.padLow + plan.padHigh, z + plan.padLow + (retainedShifts.min() ?? 0))
+        lines.append("Embryo visible in slices:")
+        if !retainedShifts.isEmpty && firstSlice < endSlice {
+            lines.append(contentsOf: (firstSlice..<endSlice).map { "\($0 + 1)" + ($0 < endSlice - 1 ? "," : "") })
+        } else {
+            lines.append("None")
         }
         return lines
     }
@@ -107,6 +93,10 @@ public enum ZReport {
         var out = m
         if let z = m.stageZ, let step = m.stageZStep, z.count == plan.shift.count {
             out.stageZ = zip(z, plan.shift).map { $0 - Double($1 + plan.padLow) * step }
+        }
+        if let stage = out.stageZ, stage.count == plan.shift.count { out.stageZ = plan.kept.map { stage[$0] } }
+        if plan.kept.count != plan.shift.count, let period = m.timeIncrement {
+            out.timeOffsets = plan.kept.map { Double($0) * period }
         }
         return out
     }
@@ -119,13 +109,16 @@ enum ZPass {
     static func measure(source src: FrameSource, position p: Int, options: ZCorrectionOptions, channel: Int,
                         thresholds: ThresholdConfig?, backend: ComputeBackend?, cache: FrameCache?,
                         context ctx: RunContext) throws -> ZTracker {
+        if let limit = options.maximumStep, !limit.isFinite || limit <= 0 {
+            throw DCError("Maximum shift must be a positive number of slices")
+        }
         let meta = src.metadata(position: p)
         var box: ZBox?
         if case .box(let x, let y, let w, let h) = options.region { box = ZBox(x: x, y: y, width: w, height: h) }
         if options.region == .embryoMask && (thresholds == nil || backend == nil) {
             throw DCError("Following the embryo mask needs a threshold YAML file. Give one, or follow the whole frame or a box.")
         }
-        let tracker = ZTracker(options: options, metadata: meta)
+        let tracker = ZTracker(options: options)
         let T = src.t
         try orderedPipeline(count: T, width: pipelineWidth(frameBytes: src.frameBytes * 2), context: ctx, produce: { t -> ZDescriptor in
             let frame = try src.readFrame(t: t, p: p)
@@ -134,8 +127,7 @@ enum ZPass {
             if options.region == .embryoMask, let cfg = thresholds, let b = backend {
                 mask = try Detection.computeShift(frame: frame, params: try cfg.params(forTimepoint: t), backend: b).mask
             }
-            let d = ZDrift.describe(frame: frame, channel: channel, mask: mask, box: box, pixelSizeUm: meta.physicalSizeX,
-                                    detectNuclei: options.useNuclei)
+            let d = ZDrift.describe(frame: frame, channel: channel, mask: mask, box: box)
             cache?.put(p * T + t, frame)
             return d
         }, consume: { t, d in
@@ -153,8 +145,7 @@ enum ZPass {
 
     static func describeRun(_ src: FrameSource, _ meta: ImageMetadata, channel: Int) -> String {
         let name = channel < meta.channelNames.count ? meta.channelNames[channel] : "ch\(channel)"
-        return "Z drift of \(name) (index \(channel)), T=\(src.t), Z=\(src.z), "
-            + (meta.stageZ == nil ? "no stage positions in the file" : "starting from the stage positions")
+        return "Z drift of \(name) (index \(channel)), T=\(src.t), Z=\(src.z)"
     }
 }
 
@@ -242,15 +233,16 @@ public enum ZCorrectPipeline {
         let csv = dir.appendingPathComponent("\(stem)_z_shifts.csv")
         ctx.log("\n--- Pass 2: moving slices ---")
         ctx.log("  Saving \(out.lastPathComponent) ...")
-        let writer = try OMETIFFWriter(url: out, t: T, c: src.c, z: src.z + plan.padLow + plan.padHigh, y: src.y, x: src.x,
+        let writer = try OMETIFFWriter(url: out, t: plan.kept.count, c: src.c, z: src.z + plan.padLow + plan.padHigh, y: src.y, x: src.x,
                                        type: src.sampleType, metadata: ZReport.correctedStage(meta, plan: plan),
                                        bigTIFF: options.lowMemory ? true : nil)
-        try orderedPipeline(count: T, width: pipelineWidth(frameBytes: src.frameBytes * 2), context: ctx, produce: { t -> Volume in
+        try orderedPipeline(count: plan.kept.count, width: pipelineWidth(frameBytes: src.frameBytes * 2), context: ctx, produce: { index -> Volume in
+            let t = plan.kept[index]
             let frame = try cache.take(p * T + t) ?? src.readFrame(t: t, p: p)
             return ZDrift.place(frame, shift: plan.shift[t], padLow: plan.padLow, padHigh: plan.padHigh)
         }, consume: { t, v in
             try writer.writeVolume(v)
-            ctx.progress("Pass 2: moving slices", t + 1, T)
+            ctx.progress("Pass 2: moving slices", t + 1, plan.kept.count)
         })
         try writer.finish()
         try ZReport.csv(steps: tracker.steps, plan: plan, stageZ: meta.stageZ).write(to: csv, atomically: true, encoding: .utf8)

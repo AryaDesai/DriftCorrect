@@ -12,11 +12,13 @@ public struct ImageMetadata: Equatable, Sendable {
     public var physicalSizeZUnit: String? = "µm"
     public var timeIncrementUnit: String? = "s"
     /// The stage z position of the first slice of every timepoint, in micrometres. It is nil when the file does not
-    /// record it. Z correction uses the change between timepoints as its first estimate.
+    /// record it. Kept for metadata and diagnostics; it does not determine Z correction.
     public var stageZ: [Double]?
     /// The change in stage z from one slice to the next, in micrometres. It is negative when the stack was acquired
     /// from top to bottom.
     public var stageZStep: Double?
+    /// Original acquisition times retained when timepoints are omitted from the output.
+    public var timeOffsets: [Double]?
 
     public init(channelNames: [String], physicalSizeX: Double? = nil, physicalSizeY: Double? = nil,
                 physicalSizeZ: Double? = nil, timeIncrement: Double? = nil) {
@@ -194,12 +196,19 @@ public enum OMEXML {
         px += "<TiffData IFD=\"0\" PlaneCount=\"\(t * c * z)\"/>"
         // Write the stage z position of every slice of channel 0 as the `PositionZ` of a `Plane` element, when the
         // microscope recorded it.
-        if let stage = m.stageZ, stage.count == t {
+        let stage = m.stageZ?.count == t ? m.stageZ : nil
+        let times = m.timeOffsets?.count == t ? m.timeOffsets : nil
+        if stage != nil || times != nil {
             let slices = m.stageZStep == nil ? 1 : z
             for ti in 0..<t {
                 for zi in 0..<slices {
-                    let pz = stage[ti] + Double(zi) * (m.stageZStep ?? 0)
-                    px += "<Plane TheC=\"0\" TheT=\"\(ti)\" TheZ=\"\(zi)\" PositionZ=\"\(PyFormat.repr(pz))\" PositionZUnit=\"µm\"/>"
+                    px += "<Plane TheC=\"0\" TheT=\"\(ti)\" TheZ=\"\(zi)\""
+                    if let stage = stage {
+                        let pz = stage[ti] + Double(zi) * (m.stageZStep ?? 0)
+                        px += " PositionZ=\"\(PyFormat.repr(pz))\" PositionZUnit=\"µm\""
+                    }
+                    if let times = times { px += " DeltaT=\"\(PyFormat.repr(times[ti]))\" DeltaTUnit=\"s\"" }
+                    px += "/>"
                 }
             }
         }

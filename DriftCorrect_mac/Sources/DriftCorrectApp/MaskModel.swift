@@ -69,7 +69,7 @@ final class PreviewWorker: @unchecked Sendable {
             let result = try MaskPreview.compute(raw: raw, params: r.params, embryo: r.p, backend: Services.backend,
                                                  classCache: &classCache, cacheKey: key)
             let rgba = MaskPreview.renderComposite(raw: raw, mask: result.mask, centroid: result.centroid,
-                                                   classMap: result.classMap, selected: r.params.selectedLevels ?? [])
+                                                   classMap: result.classMap)
             // Look ahead: the next timepoint is likely next (slider drag or playback).
             r.source.prefetch(t: r.t + 1, p: r.p)
             return PreviewOutput(image: makeImage(rgba, width: raw.width, height: raw.height),

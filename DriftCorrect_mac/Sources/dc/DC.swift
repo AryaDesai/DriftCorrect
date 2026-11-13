@@ -48,6 +48,33 @@ func parseBool(_ s: String) throws -> Bool {
     }
 }
 
+/// Read a channel given as a name or as an index that starts at 0.
+func parseChannel(_ c: String?) -> (index: Int?, name: String?) {
+    guard let c = c else { return (nil, nil) }
+    return Int(c).map { ($0, nil) } ?? (nil, c)
+}
+
+/// Read the region to follow from a `--…-region` option and a `--…-box` option. `prefix` is z or xy.
+func parseRegion(_ region: String?, box: String?, prefix: String, default fallback: FollowRegion) throws -> FollowRegion {
+    var parsed: FollowRegion?
+    if let b = box {
+        let v = b.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard v.count == 4, v.allSatisfy({ $0 != nil }), v[2]! > 0, v[3]! > 0 else {
+            throw ValidationError("--\(prefix)-box needs x,y,width,height in pixels")
+        }
+        parsed = .box(x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]!)
+    }
+    switch region?.lowercased() {
+    case nil: return parsed ?? fallback
+    case "mask": return .embryoMask
+    case "whole": return .wholeFrame
+    case "box":
+        guard let b = parsed else { throw ValidationError("--\(prefix)-region box needs --\(prefix)-box x,y,width,height") }
+        return b
+    default: throw ValidationError("--\(prefix)-region must be mask, whole or box")
+    }
+}
+
 /// The z correction settings that `align --z-correct`, `correct-z` and `z-shifts` share.
 struct ZOptionGroup: ParsableArguments {
     @Option(name: [.customLong("z-channel"), .customLong("z_channel")],
@@ -55,44 +82,57 @@ struct ZOptionGroup: ParsableArguments {
     var zChannel: String?
 
     @Option(name: [.customLong("z-region"), .customLong("z_region")],
-            help: "The part of the image to follow in z. It is mask for the embryo mask, whole for the whole frame, or box for the box that --z-box gives.")
+            help: "The part of the image to follow in z. It is whole for the whole frame (default), mask for the embryo mask, or box for the box that --z-box gives.")
     var zRegion: String?
 
     @Option(name: [.customLong("z-box"), .customLong("z_box")],
             help: "A box over cells that should stay in the same slice, as x,y,width,height in pixels of the first timepoint.")
     var zBox: String?
 
-    @Flag(name: [.customLong("z-no-stage"), .customLong("z_no_stage")], help: "Ignore the stage z positions recorded in the file.")
-    var zNoStage = false
+    @Option(name: [.customLong("z-drop-above"), .customLong("z_drop_above")],
+            help: "Leave out timepoints whose movement from the timepoint before them exceeds this many slices.")
+    var zDropAbove: Double?
 
-    @Flag(name: [.customLong("z-no-nuclei"), .customLong("z_no_nuclei")], help: "Use the image comparison alone and skip the matching of individual nuclei.")
-    var zNoNuclei = false
-
-    func make(defaultRegion: ZRegion) throws -> ZCorrectionOptions {
+    func make() throws -> ZCorrectionOptions {
         var o = ZCorrectionOptions()
-        if let c = zChannel {
-            if let i = Int(c) { o.channelIndex = i } else { o.channelName = c }
+        (o.channelIndex, o.channelName) = parseChannel(zChannel)
+        o.region = try parseRegion(zRegion, box: zBox, prefix: "z", default: .wholeFrame)
+        if let limit = zDropAbove, !limit.isFinite || limit <= 0 {
+            throw ValidationError("--z-drop-above must be a positive number of slices")
         }
-        var box: ZRegion?
-        if let b = zBox {
-            let v = b.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
-            guard v.count == 4, v.allSatisfy({ $0 != nil }), v[2]! > 0, v[3]! > 0 else {
-                throw ValidationError("--z-box needs x,y,width,height in pixels")
-            }
-            box = .box(x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]!)
-        }
-        switch zRegion?.lowercased() {
-        case nil: o.region = box ?? defaultRegion
-        case "mask": o.region = .embryoMask
-        case "whole": o.region = .wholeFrame
-        case "box":
-            guard let b = box else { throw ValidationError("--z-region box needs --z-box x,y,width,height") }
-            o.region = b
-        default: throw ValidationError("--z-region must be mask, whole or box")
-        }
-        o.useStagePositions = !zNoStage
-        o.useNuclei = !zNoNuclei
+        o.maximumStep = zDropAbove
         return o
+    }
+}
+
+/// The settings of the xy alignment by image matching (`align --xy-method image`).
+struct XYOptionGroup: ParsableArguments {
+    @Option(name: [.customLong("xy-method"), .customLong("xy_method")],
+            help: "centroid centres the centroid of the embryo mask (default). image matches the image of each timepoint with the timepoint before it.")
+    var xyMethod = "centroid"
+
+    @Option(name: [.customLong("xy-channel"), .customLong("xy_channel")],
+            help: "The channel that image matching compares, given as a name or as an index that starts at 0. A nuclear marker is the best choice. The default is the threshold channel of the YAML file.")
+    var xyChannel: String?
+
+    @Option(name: [.customLong("xy-region"), .customLong("xy_region")],
+            help: "The part of the image that image matching follows. It is whole for the whole frame (default), mask for the embryo mask, or box for the box that --xy-box gives.")
+    var xyRegion: String?
+
+    @Option(name: [.customLong("xy-box"), .customLong("xy_box")],
+            help: "A box over cells that should stay still, as x,y,width,height in pixels of the first timepoint.")
+    var xyBox: String?
+
+    func make() throws -> XYMatchOptions? {
+        switch xyMethod.lowercased() {
+        case "centroid": return nil
+        case "image":
+            var o = XYMatchOptions()
+            (o.channelIndex, o.channelName) = parseChannel(xyChannel)
+            o.region = try parseRegion(xyRegion, box: xyBox, prefix: "xy", default: .wholeFrame)
+            return o
+        default: throw ValidationError("--xy-method must be centroid or image")
+        }
     }
 }
 
@@ -125,7 +165,7 @@ struct Convert: ParsableCommand {
 }
 
 struct Align: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Centroid-align embryo movies from a threshold YAML.")
+    static let configuration = CommandConfiguration(abstract: "Align embryo movies in xy from a threshold YAML, by the mask centroid or by image matching, and optionally correct z drift.")
 
     @Argument(help: "Threshold YAML from the Mask tool.")
     var yamlFile: String
@@ -155,13 +195,16 @@ struct Align: ParsableCommand {
           help: "Also correct z drift after the xy alignment. Whole slices move and empty slices fill the gaps.")
     var zCorrect = false
 
+    @OptionGroup var xy: XYOptionGroup
+
     @OptionGroup var z: ZOptionGroup
 
     @OptionGroup var backend: BackendOption
 
     func run() throws {
         var o = AlignOptions(yaml: URL(fileURLWithPath: yamlFile))
-        if zCorrect { o.zCorrection = try z.make(defaultRegion: .embryoMask) }
+        o.xyMatching = try xy.make()
+        if zCorrect { o.zCorrection = try z.make() }
         o.useND2 = useND2
         o.fps = fps
         o.enlargeCanvas = !noEnlargeCanvas
@@ -208,7 +251,7 @@ struct CorrectZ: ParsableCommand {
         o.position = position
         o.enlargeStack = !noEnlargeStack
         o.lowMemory = lowMemory
-        o.z = try z.make(defaultRegion: yaml == nil ? .wholeFrame : .embryoMask)
+        o.z = try z.make()
         let start = Date()
         _ = try ZCorrectPipeline.run(options: o, backend: backend.make(), context: consoleContext())
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
@@ -237,7 +280,7 @@ struct ZShifts: ParsableCommand {
     func run() throws {
         let url = URL(fileURLWithPath: file)
         let source: FrameSource = url.pathExtension.lowercased() == "nd2" ? try ND2Source(url: url) : try TIFFSource(url: url)
-        let options = try z.make(defaultRegion: yaml == nil ? .wholeFrame : .embryoMask)
+        let options = try z.make()
         let cfg = try yaml.map { try ThresholdConfig.load(URL(fileURLWithPath: $0)) }
         let out = csv.map { URL(fileURLWithPath: $0) }
             ?? url.deletingLastPathComponent().appendingPathComponent("\(PyFormat.stemWithoutOME(url))_z_shifts.csv")

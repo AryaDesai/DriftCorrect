@@ -189,7 +189,7 @@ public enum MaskPreview {
             var groups = [[Float]](repeating: [], count: levels)
             for i in 0..<map.count where Int(map[i]) < levels { groups[Int(map[i])].append(smoothed.pixels[i]) }
             for i in 0..<levels {
-                let state = selected.contains(i) ? "selected" : "not displayed"
+                let state = selected.contains(i) ? "selected" : "not selected"
                 series.append(HistogramSeries(label: "Class \(i) (\(state))", color: levelColors[i % levelColors.count],
                                               counts: counts(groups[i])))
             }
@@ -235,15 +235,13 @@ public enum MaskPreview {
 
     /// `render_embryo`: gray image, translucent overlay (alpha 100) and a cyan crosshair,
     /// composited with PIL's `alpha_composite` integer arithmetic. Returns RGBA bytes.
+    /// The overlay covers exactly the final mask: red, or with a class map, each pixel in its class colour.
     public static func renderComposite(raw: Image2D, mask: Mask2D, centroid: (y: Double, x: Double),
-                                       classMap: [Int32]?, selected: [Int]) -> [UInt8] {
+                                       classMap: [Int32]?) -> [UInt8] {
         let w = raw.width, h = raw.height
         var vmax = Stats.percentile(raw.pixels, 99.5)
         if vmax == 0 { vmax = 1 }
         let gray = Contrast.scale(raw.pixels, vmax: vmax)
-        var colors = [Int32: RGB]()
-        for i in selected { colors[Int32(i)] = levelColors[i % levelColors.count] }
-        let colorOf = colors
         let maskColor = RGB(255, 50, 50)
         var out = [UInt8](repeating: 255, count: w * h * 4)
         // alpha_composite of an opaque base with an overlay of alpha 100.
@@ -262,9 +260,8 @@ public enum MaskPreview {
                 Parallel.forChunks(w * h, minChunk: 1 << 14) { r in
                     for i in r {
                         let v = g[i]
-                        var color: RGB? = nil
-                        if let map = classMap { color = colorOf[map[i]] } else if mask.bits[i] { color = maskColor }
-                        if let c = color {
+                        if mask.bits[i] {
+                            let c = classMap.map { levelColors[Int($0[i]) % levelColors.count] } ?? maskColor
                             op[4 * i] = mix(c.r, v); op[4 * i + 1] = mix(c.g, v); op[4 * i + 2] = mix(c.b, v)
                         } else {
                             op[4 * i] = v; op[4 * i + 1] = v; op[4 * i + 2] = v
