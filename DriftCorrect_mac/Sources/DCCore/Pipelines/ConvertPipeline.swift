@@ -1,19 +1,18 @@
 import Foundation
 
-/// Port of `nd2_to_tif.py` (the "Convert ND2 to TIFF" tool).
+/// The "Convert ND2 to TIFF" tool, ported from `nd2_to_tif.py`.
 ///
-/// Each ND2 file is read once, in file order, and every embryo position is
-/// written to its own OME-TIFF at the same time. Then the per-file TIFFs of
-/// each position are joined along T. Concatenated files keep the stored
-/// sample type (see `TIFFConcat`).
+/// Each ND2 file is read once, in file order, and every embryo position is written to its own OME-TIFF at the
+/// same time. Then the TIFFs of each position are joined along T. Concatenated files keep the stored sample
+/// type, as `TIFFConcat` describes.
 public struct ConvertOptions {
     public var folder: URL
     public var outputDirectory: URL?
     /// Process all positions in one pass over each ND2 file.
     public var parallel = true
-    /// Only this position (0-based); nil = all.
+    /// Convert only this position, counting from 0. When nil, every position is converted.
     public var position: Int?
-    /// Skip conversion; only join the per-file TIFFs already in the output directory.
+    /// Skip the conversion and only join the TIFFs that are already in the output directory.
     public var concatOnly = false
     public init(folder: URL) { self.folder = folder }
 }
@@ -71,7 +70,7 @@ public final class ConvertPipeline {
                     writers[p] = try OMETIFFWriter(url: out, t: T, c: C, z: Z, y: Y, x: X,
                                                    type: nd2.sampleType, metadata: nd2.metadata(position: p))
                 }
-                // Work items in (t, p) order; each reads all Z frames of one timepoint and position.
+                // The work items are in (t, p) order. Each one reads all Z frames of one timepoint and position.
                 let items = (0..<T).flatMap { t in group.map { (t, $0) } }
                 let width = pipelineWidth(frameBytes: C * Z * Y * X * nd2.sampleType.byteCount)
                 try orderedPipeline(count: items.count, width: width, context: ctx, produce: { i -> Volume in
@@ -105,7 +104,7 @@ public final class ConvertPipeline {
         return written
     }
 
-    /// Position indices of the per-file TIFFs (`*_P{p}.ome.tif`) in `dir`, sorted.
+    /// Return the sorted position indices of the TIFFs named `*_P{p}.ome.tif` in `dir`.
     static func existingPositions(in dir: URL) -> [Int] {
         let pattern = #/_P(\d+)\.ome\.tif$/#
         let positions = globFiles(dir, pattern: "*_P*.ome.tif").compactMap { url in

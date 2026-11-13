@@ -1,6 +1,6 @@
 import Foundation
 
-/// One image file directory (page) of a TIFF file.
+/// One image file directory of a TIFF file, which is one page.
 public struct TIFFPage: Sendable {
     public var width: Int = 0
     public var height: Int = 0
@@ -21,11 +21,10 @@ public struct TIFFPage: Sendable {
     public var decodedByteCount: Int { width * height * samplesPerPixel * max(1, bitsPerSample / 8) }
 }
 
-/// Minimal, fast TIFF / BigTIFF reader for grayscale image stacks.
+/// A TIFF and BigTIFF reader for grayscale image stacks.
 ///
-/// Supports strips with no compression, LZW, Deflate and PackBits, with or
-/// without horizontal differencing. Uncompressed pages are read directly
-/// into the caller's buffer.
+/// It supports strips with no compression, LZW, Deflate and PackBits, with or without horizontal
+/// differencing. Uncompressed pages are read directly into the buffer of the caller.
 public final class TIFFFile: @unchecked Sendable {
     public let url: URL
     public let file: RandomAccessFile
@@ -67,7 +66,7 @@ public final class TIFFFile: @unchecked Sendable {
         let entrySize = isBigTIFF ? 20 : 12
         let countSize = isBigTIFF ? 8 : 2
         let nextSize = isBigTIFF ? 8 : 4
-        // Read IFDs through a small cache window to avoid one syscall per tag.
+        // Read the directories through a small cache window, which avoids a system call for every tag.
         var window = [UInt8]()
         var windowStart: UInt64 = 0
 
@@ -164,7 +163,7 @@ public final class TIFFFile: @unchecked Sendable {
         return out
     }
 
-    /// Decode page `index` into `destination` as native-endian samples, row-major.
+    /// Decode page `index` into `destination` as samples in native byte order, row by row.
     ///
     /// `destination` must hold `pages[index].decodedByteCount` bytes.
     public func readPage(_ index: Int, into destination: UnsafeMutableRawPointer) throws {
@@ -182,7 +181,7 @@ public final class TIFFFile: @unchecked Sendable {
         }
 
         if page.compression == 1 {
-            // Uncompressed: copy strips straight into the destination.
+            // The page is uncompressed, so the strips are copied straight into the destination.
             var written = 0
             for s in 0..<page.stripOffsets.count where written < total {
                 let rows = min(page.rowsPerStrip, page.height - s * page.rowsPerStrip)
@@ -223,7 +222,7 @@ public final class TIFFFile: @unchecked Sendable {
         }
     }
 
-    /// Read the raw stored bytes of an uncompressed page (used for byte-exact concatenation).
+    /// Read the raw stored bytes of an uncompressed page. The concatenation uses this to copy pages unchanged.
     public func readRawUncompressed(_ index: Int, into destination: UnsafeMutableRawPointer) throws -> Bool {
         let page = pages[index]
         guard page.compression == 1, !page.isTiled, !bigEndian, page.predictor == 1 else { return false }

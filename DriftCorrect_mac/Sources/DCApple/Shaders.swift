@@ -1,18 +1,16 @@
-// Metal Shading Language source for the compute kernels.
+// The source of the compute kernels in the Metal Shading Language.
 //
-// scipy accumulates in float64. Apple GPUs have no float64, so the
-// Gaussian and the bilinear shift use "float-float" arithmetic: each value
-// is an unevaluated sum hi + lo of two floats (about 48 significant bits).
-// Rounding that sum to float32 gives the same result as scipy's float64
-// accumulation except in the rare case where the exact value lies within
-// ~2^-44 (relative) of a float32 rounding midpoint. The kernels must be
-// compiled with fast math off (see MetalBackend), or the error terms vanish.
+// scipy accumulates in float64. Apple GPUs have no float64, so the Gaussian and the bilinear shift use
+// arithmetic on pairs of floats. Each value is the unevaluated sum hi + lo of two floats, which holds about
+// 48 significant bits. Rounding that sum to float32 gives the same result as the float64 accumulation of
+// scipy, except in the rare case where the exact value lies very close to the midpoint between two float32
+// values. The kernels must be compiled with fast math off, as MetalBackend does, or the error terms vanish.
 
 let metalSource = #"""
 #include <metal_stdlib>
 using namespace metal;
 
-// ---------------------------------------------------------------- float-float
+// Arithmetic on pairs of floats
 inline float2 two_sum(float a, float b) {
     float s = a + b;
     float bb = s - a;
@@ -43,12 +41,12 @@ inline float2 ff_mul(float2 a, float2 b) {
     p.y = fma(a.y, b.x, p.y);
     return quick_two_sum(p.x, p.y);
 }
-// Sum of two floats as float-float (exact).
+// Return the exact sum of two floats as a pair of floats.
 inline float2 ff_from_sum(float a, float b) { return two_sum(a, b); }
-// Round float-float to the nearest float.
+// Round a pair of floats to the nearest float.
 inline float ff_round(float2 a) { return a.x + a.y; }
 
-// scipy "reflect" extension: d c b a | a b c d | d c b a
+// Extend a line as the "reflect" mode of scipy does, which is d c b a | a b c d | d c b a.
 inline int reflect_index(int i, int n) {
     if (i >= 0 && i < n) return i;
     int period = 2 * n;
@@ -57,7 +55,7 @@ inline int reflect_index(int i, int n) {
     return m >= n ? period - 1 - m : m;
 }
 
-// ---------------------------------------------------------------- Z projection
+// Maximum projection along z
 struct ProjParams { uint planeElements; uint zCount; uint firstPlane; };
 
 kernel void max_project_u16(device const ushort* src [[buffer(0)]],
@@ -93,8 +91,8 @@ kernel void max_project_f32(device const float* src [[buffer(0)]],
     dst[i] = m;
 }
 
-// ---------------------------------------------------------------- Gaussian
-// One scipy correlate1d pass. `alongY` selects axis 0 (columns) or axis 1 (rows).
+// Gaussian
+// Run one correlate1d pass of scipy. `alongY` selects axis 0, along the columns, or axis 1, along the rows.
 struct GaussParams { uint width; uint height; int radius; uint alongY; };
 
 kernel void gaussian_pass(device const float* src [[buffer(0)]],
@@ -122,16 +120,16 @@ kernel void gaussian_pass(device const float* src [[buffer(0)]],
     dst[(ulong)y * p.width + x] = ff_round(acc);
 }
 
-// ---------------------------------------------------------------- Shift
-// Per-row / per-column tables prepared on the CPU in float64:
-//   idx.x = first source index on the padded canvas, idx.y = second (clamped),
-//   w = (w0, w1) as float-float pairs; valid = 0 when the coordinate is outside the canvas.
+// Shift
+// The CPU prepares one table for the rows and one for the columns in float64. In each entry, idx.x is the
+// first source index on the padded canvas and idx.y is the second, which is clamped. w holds the weights
+// (w0, w1) as pairs of floats, and valid is 0 when the coordinate is outside the canvas.
 struct AxisEntry { int i0; int i1; int valid; int pad0; float2 w0; float2 w1; };
 struct ShiftParams {
-    uint outW; uint outH;         // canvas size
-    uint srcW; uint srcH;         // source frame size
-    int padTop; int padLeft;      // source placement on the canvas
-    int iy; int ix;               // whole-pixel shift
+    uint outW; uint outH;         // The size of the canvas.
+    uint srcW; uint srcH;         // The size of the source frame.
+    int padTop; int padLeft;      // The place of the source on the canvas.
+    int iy; int ix;               // The shift in whole pixels.
     uint planes;
 };
 
@@ -151,7 +149,7 @@ inline float sample_u8(device const uchar* s, constant ShiftParams& p, uint plan
     return float(s[(ulong)plane * p.srcW * p.srcH + (ulong)sy * p.srcW + sx]);
 }
 
-// clip(0, 65535).astype(np.uint16)
+// Convert as clip(0, 65535).astype(np.uint16) does.
 inline ushort to_u16(float v) {
     if (!(v > 0.0f)) return 0;
     if (v >= 65535.0f) return 65535;

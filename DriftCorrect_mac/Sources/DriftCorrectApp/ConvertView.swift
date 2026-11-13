@@ -1,7 +1,7 @@
 import DCCore
 import SwiftUI
 
-/// Front end for the ND2 → TIFF conversion (nd2_to_tif_gui.py).
+/// The window for converting ND2 to TIFF, which is nd2_to_tif_gui.py in the Python version.
 struct ConvertView: View {
     @ObservedObject var job: JobRunner
     @State private var inputFolder = ""

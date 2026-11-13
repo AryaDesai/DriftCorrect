@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 
 /// Objects shared by all windows.
 enum Services {
-    /// Metal on Apple silicon, with the CPU reference as fallback.
+    /// The Metal backend on Apple silicon, or the CPU reference when Metal is not available.
     static let backend: ComputeBackend = MetalBackend.best()
     static let movies: MovieWriterFactory = HEVCMovieFactory()
 }
@@ -29,9 +29,8 @@ final class PendingOutput: @unchecked Sendable {
     }
 }
 
-/// Runs one pipeline at a time on a background thread and publishes its log,
-/// progress and state. Jobs belong to the app, not to a window, so closing a
-/// window does not stop a run; quitting asks first.
+/// Runs one pipeline at a time on a background thread and publishes its log, progress and state. Jobs belong
+/// to the app, so closing a window does not stop a run. Quitting asks first.
 @MainActor
 final class JobRunner: ObservableObject {
     @Published private(set) var isRunning = false
@@ -123,7 +122,7 @@ extension Result {
     var isSuccess: Bool { if case .success = self { return true }; return false }
 }
 
-/// Text field with a Browse button (NSOpenPanel).
+/// A text field with a Browse button that opens an NSOpenPanel.
 struct PathField: View {
     @AppStorage("lastBrowseDirectory") private var lastBrowseDirectory = ""
     let placeholder: String
@@ -161,7 +160,7 @@ struct PathField: View {
     }
 }
 
-/// Scrolling, selectable log text that follows new output.
+/// Log text that scrolls, can be selected, and follows new output.
 struct LogView: View {
     let text: String
     var placeholder = "Processing output will appear here."
@@ -184,7 +183,7 @@ struct LogView: View {
     }
 }
 
-/// Status line with progress bar.
+/// A status line with a progress bar.
 struct JobStatusView: View {
     @ObservedObject var job: JobRunner
     var body: some View {

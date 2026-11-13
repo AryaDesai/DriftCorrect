@@ -1,14 +1,14 @@
 import Foundation
 
 public enum Contrast {
-    /// `auto_contrast(img, percentile=99.5)`: float32 image to uint8 gray.
+    /// Convert a float32 image to uint8 gray as `auto_contrast(img, percentile=99.5)` does.
     public static func autoContrast(_ img: [Float], percentile: Double = 99.5) -> [UInt8] {
         var vmax = Stats.percentile(img, percentile)
         if vmax == 0 { vmax = 1 }
         return scale(img, vmax: vmax)
     }
 
-    /// `np.clip(img / vmax * 255, 0, 255).astype(np.uint8)` in float32.
+    /// Scale as `np.clip(img / vmax * 255, 0, 255).astype(np.uint8)` does in float32.
     public static func scale(_ img: [Float], vmax: Float) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: img.count)
         img.withUnsafeBufferPointer { src in

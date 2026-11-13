@@ -5,7 +5,7 @@ import XCTest
 import DCCore
 @testable import DCApple
 
-/// Metal kernels against the exact CPU reference (which DCCoreTests checks against Python).
+/// Checks the Metal kernels against the exact CPU reference, which DCCoreTests checks against Python.
 final class MetalParityTests: XCTestCase {
     var gpu: MetalBackend!
     let cpu = CPUBackend()
@@ -38,7 +38,7 @@ final class MetalParityTests: XCTestCase {
                 mismatches += 1
                 maxULP = max(maxULP, abs(Int64(x.bitPattern) - Int64(y.bitPattern)))
             }
-            // Float-float emulation of float64: at most 1 ulp, on a tiny fraction of pixels.
+            // The pairs of floats emulate float64. The result differs by at most 1 ulp, on a tiny fraction of pixels.
             XCTAssertLessThanOrEqual(maxULP, 1, "\(w)x\(h) sigma \(sigma)")
             XCTAssertLessThanOrEqual(Double(mismatches), Double(w * h) * 1e-4, "\(w)x\(h) sigma \(sigma): \(mismatches) mismatches")
             print("Gaussian \(w)x\(h) sigma \(sigma): \(mismatches) pixels differ by 1 ulp")
@@ -100,7 +100,7 @@ final class MetalParityTests: XCTestCase {
     func testHEVCWriterProducesMovie() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("dc_\(UUID().uuidString).mp4")
         defer { try? FileManager.default.removeItem(at: url) }
-        let (w, h) = (257, 191)  // odd sizes: padded to even
+        let (w, h) = (257, 191)  // Odd sizes are padded to even.
         let writer = try HEVCMovieWriter(url: url, width: w, height: h, fps: 2)
         for t in 0..<6 {
             var frame = [UInt8](repeating: 0, count: w * h)

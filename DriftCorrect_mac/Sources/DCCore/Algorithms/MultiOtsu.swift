@@ -1,20 +1,18 @@
 import Foundation
 
-/// Multi-level Otsu over a uniform histogram (port of `multi_otsu_jax.py`).
+/// Otsu thresholding with several levels over a uniform histogram, ported from `multi_otsu_jax.py`.
 ///
-/// The dynamic program is the same as `_solve_histogram`: it maximizes the
-/// between-class variance over contiguous, nonempty histogram classes,
-/// and exact ties choose the earliest split. It runs in float64 on the CPU
-/// (O(classes · nbins²), about 5 million operations for 10 classes and 1024
-/// bins). Thresholds are histogram bin edges; a pixel equal to a threshold
-/// goes to the brighter class.
+/// The dynamic program is the same as `_solve_histogram`. It maximizes the variance between the classes over
+/// contiguous, nonempty histogram classes, and exact ties choose the earliest split. It runs in float64 on the
+/// CPU, and its cost grows with the number of classes times the square of the number of bins. Thresholds are
+/// histogram bin edges, and a pixel equal to a threshold goes to the brighter class.
 public enum MultiOtsu {
     public static let maxLevels = 10
     public static let defaultBins = 1024
 
     public enum Failure: Error { case invalid(String) }
 
-    /// Optimal split indices (first bin of each brighter class).
+    /// Return the optimal split indices. Each index is the first bin of a brighter class.
     public static func solve(histogram: [Double], classes: Int) -> (breaks: [Int], score: Double) {
         let nb = histogram.count
         let total = histogram.reduce(0, +)
@@ -79,7 +77,7 @@ public enum MultiOtsu {
         return (breaks, previous[nb])
     }
 
-    /// Between-class variance of a partition (the quantity the dynamic program maximizes), in float64.
+    /// Return the variance between the classes of a partition in float64. The dynamic program maximizes this value.
     public static func partitionScore(histogram: [Int], breaks: [Int]) -> Double {
         let nb = histogram.count
         let total = Double(histogram.reduce(0, +))
@@ -97,7 +95,7 @@ public enum MultiOtsu {
         return score
     }
 
-    /// `multi_otsu(image, classes, nbins)`: thresholds (bin edges) and int class labels.
+    /// Return the thresholds, which are bin edges, and the integer class of every pixel, as `multi_otsu` does.
     public static func multiOtsu(_ image: Image2D, classes: Int, nbins: Int = defaultBins) throws
         -> (thresholds: [Double], labels: [Int32]) {
         guard classes >= 1, nbins >= 1, classes <= nbins else { throw Failure.invalid("bad classes/nbins") }
@@ -120,7 +118,7 @@ public enum MultiOtsu {
         return (thresholds, labels(image.pixels, thresholds: thresholds))
     }
 
-    /// `np.searchsorted(thresholds, image, side="right")`.
+    /// Assign a class to every pixel as `np.searchsorted(thresholds, image, side="right")` does.
     public static func labels(_ pixels: [Float], thresholds: [Double]) -> [Int32] {
         var out = [Int32](repeating: 0, count: pixels.count)
         pixels.withUnsafeBufferPointer { p in
@@ -139,8 +137,8 @@ public enum MultiOtsu {
         return out
     }
 
-    /// `multiotsu_thresholds_and_classes(smoothed, levels)` from useful_functions.py,
-    /// including the fallback to no thresholds and an all-zero class map.
+    /// Do what `multiotsu_thresholds_and_classes(smoothed, levels)` in useful_functions.py does. This includes the
+    /// fallback to no thresholds and a class map of zeros.
     public static func thresholdsAndClasses(_ smoothed: Image2D, levels: Int) -> (thresholds: [Double], classes: [Int32]) {
         let lv = min(max(levels, 2), maxLevels)
         if let r = try? multiOtsu(smoothed, classes: lv, nbins: defaultBins) { return (r.thresholds, r.labels) }

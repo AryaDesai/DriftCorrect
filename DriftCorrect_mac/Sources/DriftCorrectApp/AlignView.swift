@@ -2,8 +2,8 @@ import DCApple
 import DCCore
 import SwiftUI
 
-/// Front end for the xy alignment (centroid_align_xy_gui.py), by the mask centroid or by image matching, with
-/// optional z correction after it.
+/// The window for the xy alignment, by the mask centroid or by image matching, with optional z correction
+/// after it. It is centroid_align_xy_gui.py in the Python version.
 struct AlignView: View {
     @ObservedObject var job: JobRunner
     @State private var yamlPath = ""
@@ -253,7 +253,8 @@ struct AlignView: View {
     }
 }
 
-/// Sheet for drawing the box that image matching or z correction follows, on the max projection of the first timepoint.
+/// A sheet for drawing the box that image matching or z correction follows, on the maximum projection of the first
+/// timepoint.
 struct BoxPicker: View {
     let source: URL
     let channel: Int

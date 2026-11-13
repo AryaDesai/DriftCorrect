@@ -1,7 +1,7 @@
 import Foundation
 
-/// Z-projected images of an ND2 or TIFF file for the Mask tool
-/// (`load_file` / `LazyTifAccessor` in find_threshold.py).
+/// The images of an ND2 or TIFF file projected along z for the Mask tool, as `load_file` and `LazyTifAccessor`
+/// provide in find_threshold.py.
 ///
 /// Both formats load one (t, p) at a time and keep a few recent ones. The
 /// Python tool loaded the whole ND2 file into memory at open.
@@ -36,7 +36,7 @@ public final class ProjectionSource: @unchecked Sendable {
         t = f.t; p = f.positions; c = f.c; y = f.y; x = f.x
     }
 
-    /// Max-projected (Y, X) float32 image of channel `ci` at (ti, pi).
+    /// Return the maximum projection of channel `ci` at (ti, pi) as a (Y, X) float32 image.
     public func image(t ti: Int, p pi: Int, c ci: Int) throws -> Image2D {
         try projections(t: ti, p: pi)[ci]
     }
@@ -75,7 +75,7 @@ public struct RGB: Equatable, Sendable {
 }
 
 public enum MaskPreview {
-    /// Overlay colour per intensity class (LEVEL_COLORS).
+    /// The overlay colour of each intensity class, which is LEVEL_COLORS in the Python scripts.
     public static let levelColors: [RGB] = [RGB(255, 50, 50), RGB(50, 200, 255), RGB(120, 255, 80),
                                             RGB(255, 220, 40), RGB(220, 100, 255)]
 
@@ -101,7 +101,7 @@ public enum MaskPreview {
         public var histogram: Histogram
     }
 
-    /// Cached multi-level Otsu result for one (t, p, channel, sigma, levels) key.
+    /// The cached result of Otsu with several levels for one (t, p, channel, sigma, levels) key.
     public struct ClassCache {
         public var key: String
         public var thresholds: [Double]
@@ -111,7 +111,7 @@ public enum MaskPreview {
         }
     }
 
-    /// numpy float32 `mean()` (pairwise float32 summation, float32 division).
+    /// Return the mean as `mean()` does in numpy for float32, with pairwise float32 summation and float32 division.
     public static func meanFloat32(_ values: [Float]) -> Float {
         func pw(_ a: UnsafeBufferPointer<Float>) -> Float {
             let n = a.count
@@ -136,7 +136,7 @@ public enum MaskPreview {
         return values.withUnsafeBufferPointer { pw($0) } / Float(values.count)
     }
 
-    /// One redraw of the Mask tool (`_update` and `_update_histogram`).
+    /// Do one redraw of the Mask tool, as `_update` and `_update_histogram` do.
     public static func compute(raw: Image2D, params: ThresholdParams, embryo: Int, backend: ComputeBackend,
                                classCache: inout ClassCache?, cacheKey: String) throws -> Result {
         let smoothed = try backend.gaussian(raw, sigma: params.sigma)
@@ -233,9 +233,9 @@ public enum MaskPreview {
         return Histogram(edges: edges, series: series, lines: lines, note: note)
     }
 
-    /// `render_embryo`: gray image, translucent overlay (alpha 100) and a cyan crosshair,
-    /// composited with PIL's `alpha_composite` integer arithmetic. Returns RGBA bytes.
-    /// The overlay covers exactly the final mask: red, or with a class map, each pixel in its class colour.
+    /// Draw the gray image, a translucent overlay with alpha 100 and a cyan crosshair, as `render_embryo` does. The
+    /// layers are combined with the integer arithmetic of `alpha_composite` in PIL. The result is RGBA bytes.
+    /// The overlay covers exactly the final mask. It is red, or with a class map each pixel has its class colour.
     public static func renderComposite(raw: Image2D, mask: Mask2D, centroid: (y: Double, x: Double),
                                        classMap: [Int32]?) -> [UInt8] {
         let w = raw.width, h = raw.height
@@ -244,7 +244,7 @@ public enum MaskPreview {
         let gray = Contrast.scale(raw.pixels, vmax: vmax)
         let maskColor = RGB(255, 50, 50)
         var out = [UInt8](repeating: 255, count: w * h * 4)
-        // alpha_composite of an opaque base with an overlay of alpha 100.
+        // This is `alpha_composite` of an opaque base with an overlay of alpha 100.
         let srcA: UInt32 = 100
         let blend = 255 * (255 - srcA)
         let outa255 = srcA * 255 + blend
@@ -271,7 +271,7 @@ public enum MaskPreview {
                 }
             }
         }
-        // Crosshair: arms of 25 px, 7 px wide.
+        // Draw the crosshair with arms that are 25 px long and 7 px wide.
         let cy = Shift.pyRound(centroid.y), cx = Shift.pyRound(centroid.x)
         func fill(_ y0: Int, _ y1: Int, _ x0: Int, _ x1: Int) {
             let ya = max(0, y0), yb = min(h - 1, y1), xa = max(0, x0), xb = min(w - 1, x1)
@@ -291,10 +291,10 @@ public enum MaskPreview {
     }
 }
 
-/// Save of the Mask tool (`_save_yaml` in find_threshold.py).
+/// The save of the Mask tool, which is `_save_yaml` in find_threshold.py.
 public enum MaskSave {
-    /// `{base}_P{p}_{channel}_threshold.yaml` for ND2, `{base}_{channel}_threshold.yaml` for TIFF,
-    /// next to the input file.
+    /// Return `{base}_P{p}_{channel}_threshold.yaml` for ND2 and `{base}_{channel}_threshold.yaml` for TIFF, next
+    /// to the input file.
     public static func url(for source: ProjectionSource, embryo p: Int, channel: String) -> URL {
         var base = PyFormat.stem(source.url)
         let name: String

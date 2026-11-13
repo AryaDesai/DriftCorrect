@@ -37,7 +37,7 @@ public final class RunContext: @unchecked Sendable {
     /// A context that prints to standard output and ignores progress.
     public static func console() -> RunContext { RunContext() }
 
-    /// A context that discards everything (tests).
+    /// A context that discards everything, which the tests use.
     public static func silent() -> RunContext { RunContext(log: { _ in }) }
 
     public func log(_ line: String) { logHandler(line) }
@@ -54,7 +54,7 @@ public final class RunContext: @unchecked Sendable {
 }
 
 public enum Parallel {
-    /// Number of worker threads for data-parallel CPU loops.
+    /// The number of worker threads for CPU loops that run over data in parallel.
     public static var workerCount: Int { max(1, ProcessInfo.processInfo.activeProcessorCount) }
 
     /// Run `body(range)` on disjoint contiguous chunks of `0..<count`.
@@ -79,7 +79,7 @@ public enum Parallel {
     }
 }
 
-/// Produce items concurrently, consume them in index order on the caller's thread.
+/// Produce items concurrently and consume them in index order on the thread of the caller.
 ///
 /// At most `width` items are produced ahead of the consumer, which bounds
 /// memory. This overlaps disk reads, GPU work and CPU analysis of several
@@ -148,7 +148,7 @@ public func orderedPipeline<T>(count: Int,
     group.wait()
 }
 
-/// Thread-safe counter for progress reports from concurrent work.
+/// A counter for progress reports that is safe to use from several threads.
 public final class AtomicCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0

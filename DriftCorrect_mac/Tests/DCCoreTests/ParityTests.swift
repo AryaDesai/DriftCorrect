@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import DCCore
 
-/// Swift CPU implementations against outputs of the original Python code.
+/// Checks the Swift CPU implementations against outputs of the original Python code.
 final class ParityTests: XCTestCase {
 
     func testGaussianBitExact() {
@@ -58,7 +58,7 @@ final class ParityTests: XCTestCase {
         }
     }
 
-    /// The Python code solves the multi-Otsu program in float32 (JAX); this port uses float64.
+    /// The Python code solves the Otsu program with several levels in float32 with JAX, and this port uses float64.
     /// Where float32 cannot tell two partitions apart, the results can differ. The test then
     /// requires the Swift partition to be at least as good as the Python one.
     func testMultiOtsu() {
@@ -93,7 +93,7 @@ final class ParityTests: XCTestCase {
                                                 selectedLevels: selected)
             let label = "\(c["method"]!) invert=\(c["invert"]!) sel=\(String(describing: selected))"
             if let py = c["multiotsu_thresholds"] as? [NSNumber] {
-                // Compare only where both implementations chose the same classes (see testMultiOtsu).
+                // Compare only where both implementations chose the same classes, as testMultiOtsu explains.
                 let swift = MultiOtsu.thresholdsAndClasses(img, levels: Ref.int(c["levels"])).thresholds
                 if swift != py.map({ $0.doubleValue }) { continue }
             }
@@ -149,7 +149,7 @@ final class ParityTests: XCTestCase {
                                          diagnostics: d)
         XCTAssertEqual(YAMLWriter.dump(doc), expected)
 
-        // Files written by find_threshold.py contain anchors; the reader must follow them.
+        // Files written by find_threshold.py contain anchors, and the reader must follow them.
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("anchored_\(UUID().uuidString).yaml")
         try (Ref.dict("yaml")["anchored_text"] as! String).write(to: url, atomically: true, encoding: .utf8)
         let cfg = try ThresholdConfig.load(url)

@@ -5,13 +5,12 @@ import Darwin
 import Glibc
 #endif
 
-/// Streaming OME-TIFF writer for (T, C, Z, Y, X) stacks.
+/// An OME-TIFF writer for (T, C, Z, Y, X) stacks that writes the data as it arrives.
 ///
-/// Pages are written in T, C, Z order (Z fastest), one uncompressed strip
-/// per page, as `save_ome_tiff` does through tifffile. Pixel data goes to
-/// disk as it arrives; the directories go at the end of the file. The file
-/// is written under a temporary name and renamed on `finish()`, so a failed
-/// run never leaves a partial file at the output path.
+/// Pages are written in T, C, Z order with Z varying fastest, and each page is one uncompressed strip, as
+/// `save_ome_tiff` does through tifffile. Pixel data goes to disk as it arrives, and the directories go at the
+/// end of the file. The file is written under a temporary name and renamed on `finish()`, so a failed run
+/// never leaves a partial file at the output path.
 public final class OMETIFFWriter {
     public let url: URL
     public let t: Int, c: Int, z: Int, y: Int, x: Int
@@ -28,7 +27,7 @@ public final class OMETIFFWriter {
     public var pageCount: Int { t * c * z }
     public var planeBytes: Int { y * x * type.byteCount }
 
-    /// - Parameter bigTIFF: `true` forces BigTIFF (tifffile's streaming mode).
+    /// - Parameter bigTIFF: `true` forces BigTIFF, which is what tifffile uses when it writes a stream.
     ///   `nil` selects BigTIFF only when the data would not fit a classic TIFF.
     public init(url: URL, t: Int, c: Int, z: Int, y: Int, x: Int, type: SampleType,
                 metadata: ImageMetadata, bigTIFF: Bool? = nil) throws {
@@ -37,7 +36,7 @@ public final class OMETIFFWriter {
         self.type = type
         self.metadata = metadata
         let dataBytes = UInt64(t * c * z) * UInt64(y * x * type.byteCount)
-        let limit: UInt64 = (1 << 32) - (1 << 25)  // tifffile: 4 GB minus 32 MB
+        let limit: UInt64 = (1 << 32) - (1 << 25)  // tifffile uses 4 GB minus 32 MB.
         self.bigTIFF = bigTIFF ?? (dataBytes > limit)
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -47,7 +46,7 @@ public final class OMETIFFWriter {
         tempURL = temp
         fd = handle
         position = 0
-        // Header; the first-IFD offset is patched in finish().
+        // Write the header. `finish()` fills in the offset of the first directory.
         var header = [UInt8]()
         if self.bigTIFF {
             header = [0x49, 0x49, 43, 0, 8, 0, 0, 0] + [UInt8](repeating: 0, count: 8)
@@ -81,10 +80,10 @@ public final class OMETIFFWriter {
         try b.withUnsafeBytes { try writeRaw($0.baseAddress!, $0.count) }
     }
 
-    /// Append one (Y, X) plane of `type` samples in native (little-endian) order.
+    /// Append one (Y, X) plane of `type` samples in little endian order, which is the native order.
     public func writePlane(_ p: UnsafeRawPointer) throws {
         guard pageOffsets.count < pageCount else { throw DCError("Too many planes written to \(url.lastPathComponent)") }
-        // Keep plane data 2-byte aligned for readers that map pages directly.
+        // Keep plane data aligned to 2 bytes for readers that map pages directly.
         if position % 2 == 1 { try writeBytes([0]) }
         pageOffsets.append(position)
         try writeRaw(p, planeBytes)
@@ -96,7 +95,7 @@ public final class OMETIFFWriter {
             throw DCError("Frame shape does not match the output \(url.lastPathComponent)")
         }
         if position % 2 == 1 { try writeBytes([0]) }
-        // Planes are contiguous in the volume: one write for the whole block.
+        // Planes are contiguous in the volume, so one write covers the whole block.
         for k in 0..<v.planeCount { pageOffsets.append(position + UInt64(k * planeBytes)) }
         guard pageOffsets.count <= pageCount else { throw DCError("Too many planes written to \(url.lastPathComponent)") }
         try writeRaw(v.storage.raw, v.byteCount)
@@ -112,7 +111,7 @@ public final class OMETIFFWriter {
         let firstIFD = position
         let block = buildDirectories(start: firstIFD)
         try writeBytes(block)
-        // Patch the first-IFD offset in the header.
+        // Fill in the offset of the first directory in the header.
         var patch = [UInt8]()
         if bigTIFF { patch = le64(firstIFD) } else { patch = le32(UInt32(firstIFD)) }
         let at: off_t = bigTIFF ? 8 : 4
@@ -136,7 +135,7 @@ public final class OMETIFFWriter {
         var tag: UInt16
         var type: UInt16
         var count: UInt64
-        var value: [UInt8]  // already encoded, little-endian
+        var value: [UInt8]  // The value is already encoded in little endian order.
     }
 
     private func buildDirectories(start: UInt64) -> [UInt8] {

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Decoded ND2 metadata value (CLX Lite variant or CLX XML variant).
+/// A decoded ND2 metadata value, from a CLX Lite variant or a CLX XML variant.
 public indirect enum CLXValue: Equatable, Sendable {
     case bool(Bool)
     case int(Int64)
@@ -38,7 +38,7 @@ public indirect enum CLXValue: Equatable, Sendable {
         }
     }
 
-    /// Python truthiness.
+    /// Whether Python would treat the value as true.
     public var truthy: Bool {
         switch self {
         case .bool(let b): return b
@@ -55,7 +55,7 @@ public indirect enum CLXValue: Equatable, Sendable {
     public var string: String? { if case .string(let s) = self { return s }; return nil }
 }
 
-/// Insertion-ordered dictionary (Python dict semantics).
+/// A dictionary that keeps the order of insertion, as a Python dict does.
 public struct CLXDict: Equatable, Sendable {
     public private(set) var keys: [String] = []
     private var storage: [String: CLXValue] = [:]
@@ -79,7 +79,7 @@ public struct CLXDict: Equatable, Sendable {
     public var isEmpty: Bool { keys.isEmpty }
 }
 
-/// Port of `nd2._parse._clx_lite.json_from_clx_lite_variant` (strip_prefix=False).
+/// Ported from `nd2._parse._clx_lite.json_from_clx_lite_variant` with strip_prefix=False.
 public enum CLXLite {
     enum T {
         static let bool = 1, int32 = 2, uint32 = 3, int64 = 4, uint64 = 5, double = 6
@@ -93,7 +93,7 @@ public enum CLXLite {
 
     static func decode(_ r: inout ByteReader, count: Int) throws -> CLXDict {
         var output = CLXDict()
-        var listItems: [CLXValue]? = nil  // values stored under the empty key
+        var listItems: [CLXValue]? = nil  // These are the values stored under the empty key.
         if r.remaining == 0 { return output }
         for _ in 0..<count {
             let recordStart = r.pos
@@ -107,7 +107,7 @@ public enum CLXLite {
             if dataType != T.compress {
                 let raw = try r.readBytes(nameLength * 2)
                 name = decodeUTF16(raw)
-                if !name.isEmpty { name.removeLast() }  // drop the trailing NUL
+                if !name.isEmpty { name.removeLast() }  // Drop the trailing NUL.
             }
 
             if dataType == T.compress {
@@ -191,7 +191,7 @@ public enum CLXLite {
     }
 }
 
-/// Port of `nd2._parse._clx_xml.json_from_clx_variant` (strip_prefix=False), for ND2 v2 files.
+/// Ported from `nd2._parse._clx_xml.json_from_clx_variant` with strip_prefix=False, for ND2 version 2 files.
 public enum CLXXML {
     final class Node {
         let name: String

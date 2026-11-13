@@ -1,25 +1,25 @@
 import Foundation
 
-/// Connected components with the numbering of `scipy.ndimage.label`.
+/// Finds connected components and numbers them as `scipy.ndimage.label` does.
 ///
-/// Labels are assigned in raster order of each component's first pixel,
-/// which is scipy's order. `largest` breaks size ties toward the lowest
-/// label, as `np.bincount(...).argmax()` does. The work is run-length based.
+/// Labels are assigned in raster order of the first pixel of each component, which is the order that scipy
+/// uses. When two components have the same size, `largest` returns the lower label, as
+/// `np.bincount(...).argmax()` does. The work is done on runs of pixels along rows.
 public struct Components {
     public let width: Int
     public let height: Int
-    /// Runs in raster order: row, first column, one past the last column.
+    /// The runs in raster order. Each run has a row, a first column, and the column one past its last pixel.
     public let runRow: [Int32]
     public let runStart: [Int32]
     public let runEnd: [Int32]
-    /// 1-based label of each run.
+    /// The label of each run, starting at 1.
     public let runLabel: [Int32]
-    /// sizes[label] = pixel count; sizes[0] = 0.
+    /// The pixel count of each label. `sizes[0]` is 0.
     public let sizes: [Int]
 
     public var count: Int { sizes.count - 1 }
 
-    /// Label of the largest component, or nil when there is no foreground.
+    /// Return the label of the largest component, or nil when there is no foreground.
     public var largest: Int? {
         var best = 0, bestSize = 0
         for l in 1..<max(1, sizes.count) where sizes[l] > bestSize { best = l; bestSize = sizes[l] }
@@ -35,7 +35,7 @@ public struct Components {
         return Mask2D(width: width, height: height, bits: bits)
     }
 
-    /// Mean (row, column) of the component's pixels (`np.argwhere(mask).mean(axis=0)`).
+    /// Return the mean (row, column) of the pixels of a component, as `np.argwhere(mask).mean(axis=0)` does.
     public func centroid(of label: Int) -> (y: Double, x: Double) {
         var sy: Int64 = 0, sx: Int64 = 0, n: Int64 = 0
         for r in 0..<runLabel.count where Int(runLabel[r]) == label {
@@ -57,8 +57,9 @@ public struct Components {
 }
 
 public enum Labeling {
-    /// Label a binary mask. `eightConnected` = `structure=np.ones((3, 3))`;
-    /// otherwise the default cross structure (4-connectivity).
+    /// Label a binary mask. With `eightConnected`, pixels also connect diagonally, which is
+    /// `structure=np.ones((3, 3))` in scipy. Otherwise they connect along their edges only, which is the default
+    /// structure of scipy.
     public static func label(_ mask: Mask2D, eightConnected: Bool) -> Components {
         let w = mask.width, h = mask.height
         var runRow = [Int32](), runStart = [Int32](), runEnd = [Int32]()
@@ -99,7 +100,7 @@ public enum Labeling {
                 let jEnd = rowFirstRun[y]
                 for i in rowFirstRun[y]..<rowFirstRun[y + 1] {
                     let s = runStart[i] - reach, e = runEnd[i] + reach
-                    // Skip previous-row runs that end before this run's reach.
+                    // Skip the runs of the previous row that end too early to touch this run.
                     while j < jEnd && runEnd[j] <= s { j += 1 }
                     var k = j
                     while k < jEnd && runStart[k] < e {

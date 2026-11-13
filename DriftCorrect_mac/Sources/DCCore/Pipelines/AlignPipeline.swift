@@ -1,18 +1,17 @@
 import Foundation
 
-/// Port of `centroid_align_xy.py` (the "Align movie" tool).
+/// The "Align movie" tool, ported from `centroid_align_xy.py`.
 ///
-/// Differences from the Python script, by design:
-/// - Every YAML setting is used: method, invert, levels, selected classes,
-///   block size and the per-timepoint parameters. The Python worker used only
-///   sigma, percentile and channel_index, so its result could differ from the
-///   Mask tool preview.
+/// It differs from the Python script in these ways.
+/// - Every YAML setting is used, which covers the method, invert, levels, selected classes, block size and
+///   the parameters of each timepoint. The Python worker used only sigma, percentile and channel_index, so
+///   its result could differ from the preview of the Mask tool.
 /// - `--use_nd2` writes the unaligned movies from the ND2 frames. The Python
 ///   script stopped with a NameError at that step.
-/// - Movies are encoded while the frames pass through, not by reading the
-///   TIFFs again afterwards. The frames and the contrast rule are the same.
-/// - The unaligned movie name is `{stem}_{channel}_unaligned.mp4` for both
-///   canvas modes (the two-pass Python path produced a different name).
+/// - Movies are encoded while the frames pass through. The Python script read the TIFFs again afterwards.
+///   The frames and the contrast rule are the same.
+/// - The unaligned movie name is always `{stem}_{channel}_unaligned.mp4`. The Python script used a different
+///   name when it enlarged the canvas.
 /// - With `xyMatching` set, the xy shift comes from image matching between neighbouring timepoints, as `XYMatch`
 ///   describes, in place of the centroid of the embryo mask.
 /// - With `zCorrection` set, z correction runs after the xy alignment, as `ZDrift` describes. The output is then
@@ -35,7 +34,7 @@ public struct AlignResult {
     public var outputDirectory: URL
     public var tiffs: [URL] = []
     public var movies: [URL] = []
-    /// shifts[p][t] = (dy, dx)
+    /// The shift (dy, dx) of timepoint `t` of embryo `p` is `shifts[p][t]`.
     public var shifts: [[(dy: Double, dx: Double)]] = []
     /// The z correction of each embryo. `zSteps` holds what was measured at every timepoint and `zPlans` holds
     /// the shifts in whole slices.
@@ -61,7 +60,7 @@ public final class AlignPipeline {
         var base: String
         var outDir: URL
         var isND2: Bool
-        /// Stem used for TIF-based output names (`Path.stem` minus `.ome`).
+        /// The stem of the output names for a TIFF input, which is `Path.stem` without `.ome`.
         var stem: String
     }
 

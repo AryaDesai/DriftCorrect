@@ -1,16 +1,16 @@
 import Foundation
 
-/// How a computed (dy, dx) is applied to the frame.
+/// Selects how a shift (dy, dx) is applied to the frame.
 public enum ShiftMode: String, Sendable, CaseIterable {
-    /// `scipy.ndimage.shift(order=1, mode="constant", cval=0)`: sub-pixel bilinear.
-    /// This is what the Python CPU path produced.
+    /// The shift is applied with bilinear interpolation, as `scipy.ndimage.shift(order=1, mode="constant", cval=0)`
+    /// does. This is what the CPU path of the Python scripts produced.
     case subpixel
-    /// Shift rounded to whole pixels (Python's `round`), zeros at exposed edges.
-    /// This is what the Python `--use_gpu` path produced.
+    /// The shift is rounded to whole pixels as `round` does in Python, and exposed edges are filled with zeros.
+    /// This is what the `--use_gpu` path of the Python scripts produced.
     case integer
 }
 
-/// Placement of the source frame inside a larger zero canvas (two-pass canvas expansion).
+/// The placement of the source frame inside a larger canvas of zeros.
 public struct Padding: Equatable, Sendable {
     public var top = 0, bottom = 0, left = 0, right = 0
     public init(top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0) {
@@ -18,8 +18,8 @@ public struct Padding: Equatable, Sendable {
     }
     public static let none = Padding()
 
-    /// Padding that keeps every shifted pixel on the canvas:
-    /// `pad_top = ceil(max(0, -min dy))`, `pad_bottom = ceil(max(0, max dy))`, same for x.
+    /// Return the padding that keeps every shifted pixel on the canvas. The top padding is
+    /// `ceil(max(0, -min dy))` and the bottom padding is `ceil(max(0, max dy))`. The same holds for x.
     public static func covering(dys: [Double], dxs: [Double]) -> Padding {
         func up(_ v: Double) -> Int { Int(max(0, v).rounded(.up)) }
         return Padding(top: up(-(dys.min() ?? 0)), bottom: up(dys.max() ?? 0),
@@ -28,13 +28,12 @@ public struct Padding: Equatable, Sendable {
 }
 
 public enum Shift {
-    /// Python `round(x)` (half to even).
+    /// Round as `round(x)` does in Python, where a half goes to the even value.
     @inline(__always) public static func pyRound(_ v: Double) -> Int { Int(v.rounded(.toNearestOrEven)) }
 
-    /// Shift every plane of `frame` on a canvas of `frame` size plus `pad`, and
-    /// convert to uint16 with `clip(0, 65535).astype(np.uint16)`.
-    ///
-    /// Exact CPU reference: double accumulation in scipy's order.
+    /// Shift every plane of `frame` on a canvas of the size of `frame` plus `pad`, and convert the result to
+    /// uint16 with `clip(0, 65535).astype(np.uint16)`. This is the exact CPU reference. It accumulates in double
+    /// precision in the order that scipy uses.
     public static func apply(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) -> Volume {
         let H = frame.y + pad.top + pad.bottom
         let W = frame.x + pad.left + pad.right
@@ -89,14 +88,14 @@ public enum Shift {
         return out
     }
 
-    /// `clip(0, 65535).astype(np.uint16)` for a float32 value.
+    /// Convert a float32 value to uint16 as `clip(0, 65535).astype(np.uint16)` does.
     @inline(__always) public static func toUInt16(_ v: Float) -> UInt16 {
         if !(v > 0) { return 0 }
         if v >= 65535 { return 65535 }
         return UInt16(v)
     }
 
-    /// Pad a frame onto a larger zero canvas without shifting (`np.pad`).
+    /// Pad a frame onto a larger canvas of zeros without shifting it, as `np.pad` does.
     public static func pad(_ frame: Volume, _ pad: Padding) -> Volume {
         let H = frame.y + pad.top + pad.bottom, W = frame.x + pad.left + pad.right
         let out = Volume(c: frame.c, z: frame.z, y: H, x: W, type: frame.type, zeroed: true)

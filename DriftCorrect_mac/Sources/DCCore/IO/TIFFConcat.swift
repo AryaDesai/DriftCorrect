@@ -1,9 +1,9 @@
 import Foundation
 
 public enum TIFFConcat {
-    /// Port of `concatenate_tifs(tif_paths, output_path)` along T.
+    /// Join TIFF files along T, as `concatenate_tifs(tif_paths, output_path)` does in the Python scripts.
     ///
-    /// Differences from the Python version, by design:
+    /// This differs from the Python version in two ways.
     /// - Samples keep their stored type (uint16 stays uint16). The Python code
     ///   converted everything to float32, which doubled the file size without
     ///   changing any value. Mixed input types still produce float32.
@@ -39,7 +39,7 @@ public enum TIFFConcat {
         let total = stacks.reduce(0) { $0 + $1.t }
         context.log("Concatenating \(sorted.count) files -> \(total) total along axis 0")
 
-        // Metadata from the first file's OME-XML only (as the Python code does).
+        // The metadata comes from the OME-XML of the first file only, as in the Python code.
         var meta = ImageMetadata(channelNames: [])
         meta.physicalSizeXUnit = nil; meta.physicalSizeYUnit = nil
         meta.physicalSizeZUnit = nil; meta.timeIncrementUnit = nil

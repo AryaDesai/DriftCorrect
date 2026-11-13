@@ -1,43 +1,44 @@
 import Foundation
 
-/// Number and path formatting that matches the Python scripts' output.
+/// Number and path formatting that matches the output of the Python scripts.
 public enum PyFormat {
-    /// Python `repr(float)`: shortest round-trip digits, `.0` for integral values.
+    /// Format as `repr(float)` does in Python, with the shortest digits that read back to the same value and `.0`
+    /// for whole numbers.
     public static func repr(_ v: Double) -> String {
         if v.isNaN { return "nan" }
         if v.isInfinite { return v > 0 ? "inf" : "-inf" }
-        return "\(v)"  // Swift uses the same shortest round-trip algorithm and exponent style.
+        return "\(v)"  // Swift uses the same algorithm and exponent style.
     }
 
-    /// C/Python printf-style formatting, e.g. `fmt("%+7.2f", dy)`.
+    /// Format in the printf style of C and Python, for example `fmt("%+7.2f", dy)`.
     public static func fmt(_ format: String, _ args: CVarArg...) -> String {
         String(format: format, locale: Locale(identifier: "en_US_POSIX"), arguments: args)
     }
 
-    /// Python `f"{x:.6g}"`.
+    /// Format as `f"{x:.6g}"` does in Python.
     public static func g6(_ v: Double) -> String { fmt("%.6g", v) }
 
-    /// Python `f"{x:g}"`.
+    /// Format as `f"{x:g}"` does in Python.
     public static func g(_ v: Double) -> String { fmt("%g", v) }
 
-    /// Python `str()` of a float percentile value such as `90.0` or `92.5`.
+    /// Format as `str()` does in Python for a float percentile value such as `90.0` or `92.5`.
     public static func str(_ v: Double) -> String { repr(v) }
 
-    /// `Path(p).stem` with a trailing `.ome` removed, as the scripts do for output names.
+    /// Return `Path(p).stem` with a trailing `.ome` removed, as the scripts do for output names.
     public static func stemWithoutOME(_ url: URL) -> String {
         var stem = url.deletingPathExtension().lastPathComponent
         if stem.hasSuffix(".ome") { stem = String(stem.dropLast(4)) }
         return stem
     }
 
-    /// Python `Path(p).stem` (removes only the last suffix).
+    /// Return `Path(p).stem` as Python does, which removes only the last suffix.
     public static func stem(_ url: URL) -> String {
         url.deletingPathExtension().lastPathComponent
     }
 
-    /// Python `round(x, n)` (round half to even at the decimal digit, via repr).
+    /// Round as `round(x, n)` does in Python, where a half goes to the even digit.
     public static func round(_ x: Double, _ n: Int) -> Double {
-        // Python rounds the exact binary value correctly; formatting with %.nf
+        // Python rounds the exact binary value correctly. Formatting with %.nf
         // uses the same correctly rounded decimal conversion.
         let s = fmt("%.\(n)f", x)
         return Double(s) ?? x
@@ -64,7 +65,8 @@ public func globFiles(_ dir: URL, pattern: String) -> [URL] {
     }
 }
 
-/// `fnmatch`-style match for patterns that only use `*`. Case-sensitive (macOS glob in Python is case-sensitive).
+/// Match a name against a pattern that only uses `*`, as `fnmatch` does. The match is case sensitive, as the
+/// glob of Python is on macOS.
 public func wildcardMatch(_ name: String, _ pattern: String) -> Bool {
     let n = Array(name.unicodeScalars)
     let p = Array(pattern.unicodeScalars)

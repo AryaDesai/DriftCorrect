@@ -1,11 +1,13 @@
 import Foundation
 
-/// `_threshold_local_otsu_torch` (methods "local_otsu_interp" and "local_otsu_pixel").
+/// Local Otsu thresholding, as `_threshold_local_otsu_torch` does for the methods "local_otsu_interp" and
+/// "local_otsu_pixel".
 ///
-/// The float32 arithmetic follows the PyTorch CPU code path operation by
-/// operation. These methods are reachable only from a hand-edited YAML.
+/// The float32 arithmetic follows the CPU code of PyTorch operation by operation. These methods can only be
+/// selected by editing a YAML file by hand.
 public enum LocalOtsu {
-    /// `batched_otsu` for one patch histogram: first argmax of the between-class variance.
+    /// Return the Otsu threshold of one patch histogram, as `batched_otsu` does. It is the first index where the
+    /// variance between the classes is largest.
     static func otsuIndex(_ hist: UnsafeBufferPointer<Float>, patchSize: Int) -> Int {
         var w1: Float = 0, cs: Float = 0
         var total: Float = 0
@@ -27,7 +29,7 @@ public enum LocalOtsu {
         return arg
     }
 
-    /// Scaled uint8 image: `((s - vmin) / (vmax - vmin) * 255.0).clamp(0, 255).to(torch.uint8)`.
+    /// Scale the image to uint8 as `((s - vmin) / (vmax - vmin) * 255.0).clamp(0, 255).to(torch.uint8)` does.
     static func scaled(_ s: Image2D, vmin: Float, vmax: Float) -> [UInt8] {
         let range = vmax - vmin
         return s.pixels.map { v in
@@ -46,10 +48,11 @@ public enum LocalOtsu {
         }
         let bs = max(1, blockSize)
         let img = scaled(smoothed, vmin: vmin, vmax: vmax)
-        var thresholdIndex = [Float](repeating: 0, count: W * H)  // out_thresh / upscaled
+        var thresholdIndex = [Float](repeating: 0, count: W * H)  // This is `out_thresh` or `upscaled` in the Python code.
 
         if !interpolate {
-            // Sliding window, reflect padding (torch "reflect" excludes the edge sample).
+            // Slide a window over the image with reflect padding. The "reflect" mode of torch leaves out the edge
+            // sample.
             let padL = bs / 2
             let padT = bs / 2
             guard padL < W && padT < H else {
@@ -70,7 +73,7 @@ public enum LocalOtsu {
                     Parallel.forChunks(H, minChunk: 1) { rows in
                         var hist = [Float](repeating: 0, count: 256)
                         for y in rows {
-                            // Sliding histogram along the row.
+                            // Update the histogram while sliding along the row.
                             for i in 0..<256 { hist[i] = 0 }
                             let ys = (0..<bs).map { refl(y - padT + $0, H) }
                             for dx in 0..<bs {
@@ -109,7 +112,8 @@ public enum LocalOtsu {
                     block[by * gw + bx] = hist.withUnsafeBufferPointer { Float(otsuIndex($0, patchSize: bs * bs)) }
                 }
             }
-            // F.interpolate(mode="bilinear", align_corners=False), PyTorch CPU index/weight rules.
+            // Interpolate as `F.interpolate(mode="bilinear", align_corners=False)` does, with the index and weight
+            // rules of the CPU code of PyTorch.
             func weights(_ outSize: Int, _ inSize: Int) -> [(i0: Int, i1: Int, l0: Float, l1: Float)] {
                 let scale = Float(inSize) / Float(outSize)
                 return (0..<outSize).map { o in

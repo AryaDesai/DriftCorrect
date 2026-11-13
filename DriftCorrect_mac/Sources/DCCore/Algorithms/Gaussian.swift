@@ -1,12 +1,11 @@
 import Foundation
 
-/// `scipy.ndimage.gaussian_filter(image, sigma)` for float32 images, bit for bit.
+/// A Gaussian filter for float32 images that reproduces `scipy.ndimage.gaussian_filter(image, sigma)` bit for bit.
 ///
-/// scipy filters axis 0 (Y) then axis 1 (X). Each pass accumulates in
-/// double precision in a fixed order, extends lines with mode "reflect"
-/// (d c b a | a b c d | d c b a) and stores float32 between passes.
+/// scipy filters axis 0 (Y) and then axis 1 (X). Each pass accumulates in double precision in a fixed order,
+/// extends lines with the mode "reflect" (d c b a | a b c d | d c b a), and stores float32 between passes.
 public enum Gaussian {
-    /// numpy's pairwise summation for a contiguous float64 array (`ndarray.sum()`).
+    /// Sum a contiguous float64 array with the pairwise summation of numpy, as `ndarray.sum()` does.
     public static func pairwiseSum(_ a: UnsafeBufferPointer<Double>) -> Double {
         let n = a.count
         if n < 8 {
@@ -33,7 +32,8 @@ public enum Gaussian {
         }
     }
 
-    /// scipy `_gaussian_kernel1d(sigma, 0, radius)` with `radius = int(truncate * sigma + 0.5)`.
+    /// Return the kernel that scipy builds with `_gaussian_kernel1d(sigma, 0, radius)`, where the radius is
+    /// `int(truncate * sigma + 0.5)`.
     public static func kernel(sigma: Double, truncate: Double = 4.0) -> (weights: [Double], radius: Int) {
         let radius = Int(truncate * sigma + 0.5)
         let sigma2 = sigma * sigma
@@ -48,7 +48,7 @@ public enum Gaussian {
         return (phi, radius)
     }
 
-    /// Index into a line of length `n` with scipy "reflect" extension.
+    /// Return the index into a line of length `n` under the "reflect" extension of scipy.
     @inline(__always)
     public static func reflect(_ i: Int, _ n: Int) -> Int {
         if i >= 0 && i < n { return i }
@@ -58,19 +58,19 @@ public enum Gaussian {
         return m >= n ? period - 1 - m : m
     }
 
-    /// One scipy `correlate1d` pass over lines of length `n`.
-    /// `load(k)` returns element k of the line, `store(k, v)` writes the float32 result.
+    /// Run one `correlate1d` pass of scipy over lines of length `n`. `load(k)` returns element k of the line, and
+    /// `store(k, v)` writes the float32 result.
     @inline(__always)
     static func correlateLine(n: Int, weights w: UnsafeBufferPointer<Double>, radius r: Int,
                               ext: UnsafeMutableBufferPointer<Double>,
                               load: (Int) -> Float, store: (Int, Float) -> Void) {
-        // Extended line buffer: ext[k + r] = line[reflect(k)] for k in -r ..< n + r.
+        // The extended line buffer holds ext[k + r] = line[reflect(k)] for k in -r ..< n + r.
         for k in -r..<(n + r) { ext[k + r] = Double(load(reflect(k, n))) }
         let center = w[r]
         for i in 0..<n {
             let c = i + r
             var acc = ext[c] * center
-            // scipy symmetric loop: jj from -r up to -1, weight fw[jj] = w[r + jj].
+            // This is the symmetric loop of scipy, where jj runs from -r up to -1 with the weight fw[jj] = w[r + jj].
             var jj = -r
             while jj < 0 {
                 acc += (ext[c + jj] + ext[c - jj]) * w[r + jj]
@@ -80,7 +80,7 @@ public enum Gaussian {
         }
     }
 
-    /// Exact CPU implementation (reference and fallback).
+    /// The exact CPU implementation. It is the reference for the GPU and the fallback when there is no GPU.
     public static func filter(_ image: Image2D, sigma: Double, truncate: Double = 4.0) -> Image2D {
         if sigma <= 1e-15 { return image }
         let (weights, radius) = kernel(sigma: sigma, truncate: truncate)
@@ -89,7 +89,7 @@ public enum Gaussian {
         var tmp = image.pixels
         var out = image.pixels
         weights.withUnsafeBufferPointer { wp in
-            // Axis 0: columns.
+            // Filter axis 0, which runs along the columns.
             image.pixels.withUnsafeBufferPointer { src in
                 tmp.withUnsafeMutableBufferPointer { dst in
                     let d = dst
@@ -103,7 +103,7 @@ public enum Gaussian {
                     }
                 }
             }
-            // Axis 1: rows.
+            // Filter axis 1, which runs along the rows.
             tmp.withUnsafeBufferPointer { src in
                 out.withUnsafeMutableBufferPointer { dst in
                     let d = dst

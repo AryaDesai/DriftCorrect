@@ -6,12 +6,12 @@ import Foundation
 import VideoToolbox
 import DCCore
 
-/// HEVC movie writer on the Apple media engine (replaces the bundled FFmpeg).
+/// An HEVC movie writer on the media engine of Apple, which replaces the bundled FFmpeg.
 ///
-/// Matches `ffmpeg_runtime.encode_rgb_mp4` with the VideoToolbox encoder:
-/// quality 0.65 (`-q:v 65`), 4:2:0, `hvc1` tag, fast start, and frames padded
-/// with black to even width and height. The file is written under a temporary
-/// name and moved into place only after a successful finish.
+/// It matches `ffmpeg_runtime.encode_rgb_mp4` with the VideoToolbox encoder. The quality is 0.65, which is
+/// `-q:v 65`, the chroma format is 4:2:0, the tag is `hvc1`, and fast start is on. Frames are padded with
+/// black to an even width and height. The file is written under a temporary name and moved into place only
+/// after a successful finish.
 public final class HEVCMovieWriter: MovieWriter {
     public let url: URL
     let width: Int, height: Int
@@ -86,7 +86,7 @@ public final class HEVCMovieWriter: MovieWriter {
         let cBase = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!.assumingMemoryBound(to: UInt8.self)
         let cStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
         gray.withUnsafeBufferPointer { g in
-            // Limited-range luma of gray RGB: Y = 16 + (220 * v + 128) >> 8 (black padding: Y = 16).
+            // The luma of gray RGB in limited range is Y = 16 + (220 * v + 128) >> 8. The black padding has Y = 16.
             for y in 0..<encodedHeight {
                 let row = yBase + y * yStride
                 if y < height {
@@ -141,7 +141,7 @@ public final class HEVCMovieWriter: MovieWriter {
     private func startWriter(format: CMFormatDescription?) throws {
         try? FileManager.default.removeItem(at: tempURL)
         let w = try AVAssetWriter(outputURL: tempURL, fileType: .mp4)
-        w.shouldOptimizeForNetworkUse = true  // -movflags +faststart
+        w.shouldOptimizeForNetworkUse = true  // This is `-movflags +faststart` in FFmpeg.
         let i = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: format)
         i.expectsMediaDataInRealTime = false
         guard w.canAdd(i) else { throw DCError("Cannot add the HEVC track to the MP4 file") }

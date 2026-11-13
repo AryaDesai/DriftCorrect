@@ -5,7 +5,7 @@ import Darwin
 import Glibc
 #endif
 
-/// Read-only file with thread-safe positional reads (`pread`).
+/// A file opened for reading. It reads at a given position with `pread`, which is safe from several threads.
 public final class RandomAccessFile: @unchecked Sendable {
     public let url: URL
     public let size: UInt64
@@ -23,7 +23,7 @@ public final class RandomAccessFile: @unchecked Sendable {
         self.fd = fd
         self.size = UInt64(st.st_size)
         #if canImport(Darwin)
-        // Sequential readahead helps the large strip reads.
+        // Reading ahead sequentially helps the large strip reads.
         _ = fcntl(fd, F_RDAHEAD, 1)
         #endif
     }
@@ -53,7 +53,7 @@ public final class RandomAccessFile: @unchecked Sendable {
     }
 }
 
-/// Little/big-endian reader over a byte array.
+/// A reader over a byte array in little endian or big endian order.
 struct ByteReader {
     let bytes: [UInt8]
     let bigEndian: Bool

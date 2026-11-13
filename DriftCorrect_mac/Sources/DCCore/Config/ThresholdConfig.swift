@@ -1,9 +1,9 @@
 import Foundation
 
-/// A threshold YAML written by the Mask tool (`find_threshold.py` schema).
+/// A threshold YAML file written by the Mask tool, with the layout that `find_threshold.py` uses.
 public struct ThresholdConfig {
     public var parameters: ThresholdParams
-    /// Materialized per-timepoint list; nil in older YAML files.
+    /// The list of parameters for every timepoint. It is nil in older YAML files.
     public var timepointParameters: [ThresholdParams]?
     public var sourceFile: String
     public var raw: [String: Any]
@@ -27,8 +27,8 @@ public struct ThresholdConfig {
         return ThresholdConfig(parameters: params, timepointParameters: perT, sourceFile: file, raw: doc)
     }
 
-    /// `normalize_threshold_params`: fill defaults (method percentile, block_size 64,
-    /// invert false, levels 3, selected_levels None).
+    /// Fill in the defaults as `normalize_threshold_params` does. The defaults are the percentile method, a block
+    /// size of 64, no inversion, 3 levels and no selected levels.
     static func parse(_ d: [String: Any]) throws -> ThresholdParams {
         guard let ch = YAMLReader.int(d["channel_index"]) else { throw DCError("Threshold parameters need channel_index") }
         guard let sigma = YAMLReader.double(d["sigma"]) else { throw DCError("Threshold parameters need sigma") }
@@ -44,7 +44,7 @@ public struct ThresholdConfig {
                                selectedLevels: selected)
     }
 
-    /// `get_threshold_params_for_timepoint(cfg, t)`.
+    /// Return the parameters for timepoint `t`, as `get_threshold_params_for_timepoint(cfg, t)` does.
     public func params(forTimepoint t: Int) throws -> ThresholdParams {
         guard let list = timepointParameters else { return parameters }
         guard t >= 0 && t < list.count else {
@@ -56,7 +56,7 @@ public struct ThresholdConfig {
 
 /// Builds the YAML that the Mask tool saves.
 public enum ThresholdYAML {
-    /// Parameter dict in the same key order as `_current_params()`.
+    /// Return the parameters in the same key order as `_current_params()`.
     public static func paramsValue(_ p: ThresholdParams) -> YAMLValue {
         var items: [(String, YAMLValue)] = [
             ("channel", .str(p.channel)),
@@ -112,7 +112,7 @@ public enum ThresholdYAML {
         ])
     }
 
-    /// `datetime.now().isoformat(timespec="seconds")` in local time.
+    /// Return the local time as `datetime.now().isoformat(timespec="seconds")` does.
     public static func nowISO() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

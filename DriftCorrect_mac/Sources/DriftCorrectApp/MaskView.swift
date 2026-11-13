@@ -2,7 +2,7 @@ import Charts
 import DCCore
 import SwiftUI
 
-/// The Mask tool window (find_threshold.py).
+/// The window of the Mask tool, which is find_threshold.py in the Python version.
 struct MaskView: View {
     @ObservedObject var model: MaskModel
 

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Otsu {
-    /// OpenCV `cv2.threshold(u8, 0, 255, THRESH_BINARY + THRESH_OTSU)` threshold value.
+    /// Return the threshold that OpenCV finds with `cv2.threshold(u8, 0, 255, THRESH_BINARY + THRESH_OTSU)`.
     public static func cv2Threshold(histogram h: [Int], total: Int) -> Int {
         let fltEpsilon = Double(Float.ulpOfOne)
         let scale = 1.0 / Double(total)
@@ -28,23 +28,24 @@ public enum Otsu {
         return maxVal
     }
 
-    /// `np.clip((v - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)` in float32.
+    /// Scale a value to uint8 in float32, as `np.clip((v - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)` does.
     @inline(__always)
     public static func toUInt8(_ v: Float, vmin: Float, range: Float) -> UInt8 {
         var s = (v - vmin) / range * Float(255)
         if s < 0 { s = 0 }
         if s > 255 { s = 255 }
-        return UInt8(s)  // truncation toward zero
+        return UInt8(s)  // The conversion truncates toward zero.
     }
 
-    /// `thresh_uint8 / 255.0 * (vmax - vmin) + vmin` with numpy 2 promotion (float32 result).
+    /// Convert a uint8 threshold back to the scale of the image, as `thresh_uint8 / 255.0 * (vmax - vmin) + vmin`
+    /// does. The result is float32, as in numpy 2.
     @inline(__always)
     public static func floatThreshold(_ t: Int, vmin: Float, vmax: Float) -> Float {
         Float(Double(t) / 255.0) * (vmax - vmin) + vmin
     }
 
-    /// Otsu threshold of a set of float32 values after scaling them to uint8.
-    /// Returns nil when the values are constant.
+    /// Return the Otsu threshold of a set of float32 values after scaling them to uint8. The result is nil when the
+    /// values are constant.
     public static func threshold(ofValues values: [Float]) -> Float? {
         guard !values.isEmpty else { return nil }
         let (vmin, vmax) = Stats.minMax(values)
@@ -56,24 +57,24 @@ public enum Otsu {
         return floatThreshold(t, vmin: vmin, vmax: vmax)
     }
 
-    /// `_threshold_global_otsu(smoothed)`.
+    /// Threshold the whole image with Otsu, as `_threshold_global_otsu(smoothed)` does in the Python scripts.
     public static func globalMask(_ smoothed: Image2D) -> Mask2D {
         guard let th = threshold(ofValues: smoothed.pixels) else {
-            // Constant image: the threshold equals vmin, so no pixel exceeds it.
+            // In a constant image the threshold equals vmin, so no pixel exceeds it.
             return Mask2D(width: smoothed.width, height: smoothed.height)
         }
         return Mask2D(width: smoothed.width, height: smoothed.height, bits: smoothed.pixels.map { $0 > th })
     }
 
-    /// `_threshold_percentile(smoothed, percentile)`.
+    /// Threshold at a percentile, as `_threshold_percentile(smoothed, percentile)` does in the Python scripts.
     public static func percentileMask(_ smoothed: Image2D, _ percentile: Double) -> (mask: Mask2D, threshold: Float) {
         let q = Stats.percentile(smoothed.pixels, percentile)
         return (Mask2D(width: smoothed.width, height: smoothed.height, bits: smoothed.pixels.map { $0 > q }), q)
     }
 
-    /// Threshold that `_threshold_percentile_otsu_roi` derives from the largest
-    /// 4-connected percentile region, or nil when that path falls back to the
-    /// percentile mask (also used for the Mask tool's histogram line).
+    /// Return the threshold that `_threshold_percentile_otsu_roi` derives from the largest region above the
+    /// percentile, where pixels connect along their edges. The result is nil when that method falls back to the
+    /// percentile mask. The Mask tool also draws this threshold in its histogram.
     public static func roiThreshold(_ smoothed: Image2D, percentileMask: Mask2D) -> Float? {
         let comps = Labeling.label(percentileMask, eightConnected: false)
         guard let roi = comps.largest else { return nil }
@@ -83,7 +84,7 @@ public enum Otsu {
         return threshold(ofValues: values)
     }
 
-    /// `_threshold_percentile_otsu_roi(smoothed, percentile)`.
+    /// Threshold with Otsu inside the percentile region, as `_threshold_percentile_otsu_roi` does.
     public static func percentileOtsuROIMask(_ smoothed: Image2D, _ percentile: Double) -> Mask2D {
         let (base, _) = percentileMask(smoothed, percentile)
         guard let th = roiThreshold(smoothed, percentileMask: base) else { return base }

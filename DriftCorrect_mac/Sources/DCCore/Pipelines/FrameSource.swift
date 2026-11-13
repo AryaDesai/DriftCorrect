@@ -1,6 +1,6 @@
 import Foundation
 
-/// Timepoint frames of one file, as (C, Z, Y, X) volumes.
+/// The frames of one file, with one (C, Z, Y, X) volume for each timepoint.
 public protocol FrameSource: AnyObject {
     var t: Int { get }
     var positions: Int { get }
@@ -77,13 +77,13 @@ final class FrameCache {
         return frames.removeValue(forKey: key)
     }
 
-    /// Cache when the whole data set uses at most 40% of physical memory.
+    /// Return whether to cache, which is when the whole data set uses at most 40% of physical memory.
     static func fits(bytes: Int) -> Bool {
         Double(bytes) <= 0.4 * Double(ProcessInfo.processInfo.physicalMemory)
     }
 }
 
-/// Number of frames to keep in flight for a given frame size (bounded to about 2 GB).
+/// Return the number of frames to work on at once for a given frame size, which is limited to about 2 GB.
 func pipelineWidth(frameBytes: Int) -> Int {
     let budget = 2 << 30
     let byMemory = max(1, budget / max(1, frameBytes))

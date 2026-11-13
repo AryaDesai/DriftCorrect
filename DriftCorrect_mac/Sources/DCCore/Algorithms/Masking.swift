@@ -1,18 +1,18 @@
 import Foundation
 
-/// Threshold settings for one timepoint (one entry of `timepoint_parameters`).
+/// The threshold settings for one timepoint, which is one entry of `timepoint_parameters` in the YAML file.
 public struct ThresholdParams: Equatable, Sendable {
     public var channel: String
     public var channelIndex: Int
     public var sigma: Double
     public var percentile: Double
-    /// "percentile", "multiotsu", "global_otsu", "percentile_otsu_roi",
-    /// "local_otsu_interp" or "local_otsu_pixel". Unknown values act as "percentile".
+    /// One of "percentile", "multiotsu", "global_otsu", "percentile_otsu_roi", "local_otsu_interp" and
+    /// "local_otsu_pixel". An unknown value acts as "percentile".
     public var method: String
     public var blockSize: Int
     public var invert: Bool
     public var levels: Int
-    /// nil selects the brightest class only.
+    /// When this is nil, only the brightest class is selected.
     public var selectedLevels: [Int]?
 
     public init(channel: String = "", channelIndex: Int = 0, sigma: Double = 2, percentile: Double = 90,
@@ -32,12 +32,12 @@ public struct ThresholdParams: Equatable, Sendable {
 
 public struct MaskResult: Sendable {
     public var mask: Mask2D
-    /// (row, column) centroid; the frame centre when the mask is empty.
+    /// The centroid as (row, column). It is the frame centre when the mask is empty.
     public var centroid: (y: Double, x: Double)
 }
 
 public enum Masking {
-    /// `find_largest_mask_xy(smoothed, percentile, method, block_size, invert, levels, selected_levels, class_map)`.
+    /// Find the mask as `find_largest_mask_xy` does in the Python scripts, with the same arguments.
     public static func findLargestMask(_ smoothed: Image2D, percentile: Double, method: String = "percentile",
                                        blockSize: Int = 32, invert: Bool = false, levels: Int = 3,
                                        selectedLevels: [Int]? = nil, classMap: [Int32]? = nil) throws -> MaskResult {
@@ -67,7 +67,7 @@ public enum Masking {
         return largestComponent(binary)
     }
 
-    /// Largest 8-connected component and its centroid.
+    /// Return the largest component, where pixels also connect diagonally, and its centroid.
     public static func largestComponent(_ binary: Mask2D) -> MaskResult {
         let comps = Labeling.label(binary, eightConnected: true)
         guard let l = comps.largest else {
@@ -77,19 +77,19 @@ public enum Masking {
         return MaskResult(mask: comps.mask(of: l), centroid: comps.centroid(of: l))
     }
 
-    /// Centroid only (skips building the mask image).
+    /// Return only the centroid, without building the mask image.
     public static func largestCentroid(_ binary: Mask2D) -> (y: Double, x: Double) {
         let comps = Labeling.label(binary, eightConnected: true)
         guard let l = comps.largest else { return (Double(binary.height) / 2, Double(binary.width) / 2) }
         return comps.centroid(of: l)
     }
 
-    /// `dy = Y / 2 - cy`, `dx = X / 2 - cx`.
+    /// Return the shift that moves the centroid to the frame centre, which is `dy = Y / 2 - cy` and `dx = X / 2 - cx`.
     public static func shift(toCenter centroid: (y: Double, x: Double), height: Int, width: Int) -> (dy: Double, dx: Double) {
         (Double(height) / 2 - centroid.y, Double(width) / 2 - centroid.x)
     }
 
-    /// The log line `compute_shift_xy` prints: `dy=%+7.2f  dx=%+7.2f`.
+    /// Format the log line that `compute_shift_xy` prints, which is `dy=%+7.2f  dx=%+7.2f`.
     public static func shiftLine(_ dy: Double, _ dx: Double) -> String {
         PyFormat.fmt("dy=%+7.2f  dx=%+7.2f", dy, dx)
     }

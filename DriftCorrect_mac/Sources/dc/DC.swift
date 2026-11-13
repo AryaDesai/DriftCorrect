@@ -6,9 +6,8 @@ import Foundation
 import CryptoKit
 #endif
 
-/// Command-line front end. The `convert` and `align` commands take the same
-/// arguments as nd2_to_tif.py and centroid_align_xy.py (both `--output_dir`
-/// and `--output-dir` spellings work).
+/// The command line tool. The `convert` and `align` commands take the same arguments as nd2_to_tif.py and
+/// centroid_align_xy.py. Both spellings `--output_dir` and `--output-dir` work.
 @main
 struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -105,7 +104,7 @@ struct ZOptionGroup: ParsableArguments {
     }
 }
 
-/// The settings of the xy alignment by image matching (`align --xy-method image`).
+/// The settings of the xy alignment by image matching, which `align --xy-method image` selects.
 struct XYOptionGroup: ParsableArguments {
     @Option(name: [.customLong("xy-method"), .customLong("xy_method")],
             help: "centroid centres the centroid of the embryo mask (default). image matches the image of each timepoint with the timepoint before it.")
@@ -342,7 +341,7 @@ struct Bench: ParsableCommand {
         let p = frame.storage.raw.assumingMemoryBound(to: UInt16.self)
         for i in 0..<frame.elementCount { p[i] = UInt16(i % 60000) }
         func median(_ runs: Int, _ body: () throws -> Void) rethrows -> Double {
-            try body()  // warm-up (first GPU use, allocation)
+            try body()  // Run once to warm up, which covers the first GPU use and the allocation.
             var times: [Double] = []
             for _ in 0..<runs {
                 let t = Date()

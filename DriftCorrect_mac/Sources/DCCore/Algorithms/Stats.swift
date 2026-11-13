@@ -3,12 +3,12 @@ import Foundation
 public enum Stats {
     // MARK: Selection
 
-    /// k-th smallest element (0-based); partially reorders `a`.
+    /// Return the element at position `k` of the sorted order, counting from 0. This partially reorders `a`.
     static func select(_ buffer: UnsafeMutableBufferPointer<Float>, _ k: Int) -> Float {
         var a = buffer
         var lo = 0, hi = a.count - 1
         while hi > lo {
-            // Median of three pivot.
+            // Use the median of three values as the pivot.
             let mid = lo + (hi - lo) / 2
             if a[mid] < a[lo] { a.swapAt(mid, lo) }
             if a[hi] < a[lo] { a.swapAt(hi, lo) }
@@ -25,10 +25,10 @@ public enum Stats {
         return a[k]
     }
 
-    /// `np.percentile(values, q)` with the default "linear" method, for float32 data.
+    /// Return `np.percentile(values, q)` with the default "linear" method for float32 data.
     ///
-    /// Reproduces numpy 2 exactly: the virtual index is `(n - 1) * (q / 100)`
-    /// in float64 and the interpolation is numpy's `_lerp` in float32.
+    /// This reproduces numpy 2 exactly. The virtual index is `(n - 1) * (q / 100)` in float64, and the
+    /// interpolation is the `_lerp` of numpy in float32.
     public static func percentile(_ values: [Float], _ q: Double) -> Float {
         let n = values.count
         precondition(n > 0, "percentile of empty array")
@@ -48,14 +48,15 @@ public enum Stats {
             let prev = Int(v.rounded(.down))
             let gamma = v - Double(prev)
             let lower = select(a, prev)
-            // After selection every element right of `prev` is >= lower; the next order statistic is their minimum.
+            // After the selection every element right of `prev` is >= lower, so the next order statistic is their
+            // minimum.
             var upper = Float.infinity
             for i in (prev + 1)..<n where a[i] < upper { upper = a[i] }
             return lerp(lower, upper, gamma)
         }
     }
 
-    /// numpy `_lerp(a, b, t)` with float32 operands and a weak Python-float `t`.
+    /// Interpolate as the `_lerp(a, b, t)` of numpy does with float32 operands and a weak Python float `t`.
     @inline(__always)
     public static func lerp(_ a: Float, _ b: Float, _ t: Double) -> Float {
         let diff = b - a
@@ -65,7 +66,7 @@ public enum Stats {
         return a + diff * Float(t)
     }
 
-    /// Several percentiles of the same data (sorted once).
+    /// Return several percentiles of the same data, which is sorted once.
     public static func percentiles(_ values: [Float], _ qs: [Double]) -> [Float] {
         let n = values.count
         precondition(n > 0)
@@ -87,7 +88,7 @@ public enum Stats {
 
     // MARK: Histograms
 
-    /// `np.histogram(values.astype(np.float64), bins=nbins)` — counts and float64 edges.
+    /// Return the counts and float64 edges of `np.histogram(values.astype(np.float64), bins=nbins)`.
     public static func histogram64(_ values: [Float], bins nbins: Int) -> (counts: [Int], edges: [Double]) {
         var first = Double.infinity, last = -Double.infinity
         for v in values { let d = Double(v); if d < first { first = d }; if d > last { last = d } }
@@ -111,8 +112,8 @@ public enum Stats {
         return (counts, edges)
     }
 
-    /// `np.histogram_bin_edges(float32_values, bins)` and counts, computed in float32 as numpy does
-    /// for float32 input (display histogram in the Mask tool).
+    /// Return `np.histogram_bin_edges(float32_values, bins)` and the counts, computed in float32 as numpy does for
+    /// float32 input. The Mask tool uses this for the histogram it displays.
     public static func histogram32(_ values: [Float], bins nbins: Int, range: (Float, Float)? = nil)
         -> (counts: [Int], edges: [Float]) {
         let mm = minMax(values)

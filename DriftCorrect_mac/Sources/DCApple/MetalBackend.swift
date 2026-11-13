@@ -3,14 +3,14 @@ import Foundation
 import Metal
 import DCCore
 
-/// GPU implementation of `ComputeBackend` for Apple silicon.
+/// The GPU implementation of `ComputeBackend` for Apple silicon.
 ///
-/// - Frames use unified memory: a `Volume`'s page-aligned storage is wrapped
-///   in an `MTLBuffer` without a copy, and shift output is written straight
-///   into the result volume's storage.
-/// - The Gaussian is separable (2 passes of 2r+1 taps), not a full 2-D
-///   (2r+1)² kernel as in the Python GPU path.
-/// - Thread safe: every call encodes its own command buffer.
+/// - Frames use unified memory. The storage of a `Volume`, which is aligned to pages, is wrapped in an
+///   `MTLBuffer` without a copy, and the output of a shift is written straight into the storage of the
+///   result volume.
+/// - The Gaussian runs as 2 passes of 2r+1 taps. The GPU path of the Python scripts used a full kernel of
+///   (2r+1)² taps.
+/// - It is safe to call from several threads, because every call encodes its own command buffer.
 public final class MetalBackend: ComputeBackend {
     public let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -22,7 +22,7 @@ public final class MetalBackend: ComputeBackend {
         self.device = device
         self.queue = queue
         let options = MTLCompileOptions()
-        // Float-float arithmetic needs IEEE-exact float operations.
+        // The arithmetic on pairs of floats needs float operations that follow IEEE exactly.
         if #available(macOS 15.0, *) {
             options.mathMode = .safe
         } else {
@@ -39,12 +39,12 @@ public final class MetalBackend: ComputeBackend {
         }
     }
 
-    /// Metal on Apple silicon when available, else the CPU reference.
+    /// Return the Metal backend on Apple silicon when it is available, and the CPU reference otherwise.
     public static func best() -> ComputeBackend { MetalBackend() ?? CPUBackend() }
 
     // MARK: Buffers
 
-    /// Wrap page-aligned volume storage without copying.
+    /// Wrap the storage of a volume, which is aligned to pages, without copying it.
     private func wrap(_ storage: AlignedBuffer) throws -> MTLBuffer {
         guard let b = device.makeBuffer(bytesNoCopy: storage.raw, length: storage.capacity,
                                         options: .storageModeShared, deallocator: nil) else {
@@ -152,7 +152,7 @@ public final class MetalBackend: ComputeBackend {
             return buf
         }
         try run { enc in
-            // Axis 0 (along Y), then axis 1 (along X), as scipy does.
+            // Filter axis 0, along Y, and then axis 1, along X, as scipy does.
             enc.setBuffer(a, offset: 0, index: 0)
             enc.setBuffer(b, offset: 0, index: 1)
             enc.setBuffer(wBuffer, offset: 0, index: 2)
@@ -167,7 +167,7 @@ public final class MetalBackend: ComputeBackend {
         return Image2D(width: image.width, height: image.height, pixels: floats(c, count: image.count))
     }
 
-    /// Interpolation table of one axis (computed in float64 as scipy does).
+    /// Return the interpolation table of one axis, computed in float64 as scipy does.
     struct AxisEntry {
         var i0: Int32; var i1: Int32; var valid: Int32; var pad: Int32
         var w0: SIMD2<Float>; var w1: SIMD2<Float>

@@ -2,17 +2,17 @@ import Foundation
 
 /// A TIFF file viewed as a (T, C, Z, Y, X) stack, as `tifffile.series[0]` shows it.
 ///
-/// Singleton axes are kept (tifffile squeezes them, which made the Python
-/// scripts fail on single-channel or single-slice files).
+/// Axes of length 1 are kept. tifffile removes them, which made the Python scripts fail on files with one
+/// channel or one slice.
 public final class TIFFStack: @unchecked Sendable {
     public let url: URL
     public let tiff: TIFFFile
     public let t: Int, c: Int, z: Int, y: Int, x: Int
     public let sampleType: SampleType
     public let metadata: ImageMetadata
-    /// OME-XML text of the first page, when present (`tif.ome_metadata`).
+    /// The OME-XML text of the first page when present, which is `tif.ome_metadata` in tifffile.
     public let omeXML: String?
-    /// Axis strides for the page index, in pages.
+    /// The stride of each axis in the page index, in pages.
     private let strideT: Int, strideC: Int, strideZ: Int
     private let firstPage: Int
 
@@ -42,7 +42,7 @@ public final class TIFFStack: @unchecked Sendable {
         var ome: String?
         var first = 0
 
-        // 1. JSON description (tifffile "shaped" series) — load_tif_metadata tries this first.
+        // First try the JSON description of a tifffile "shaped" series, as `load_tif_metadata` does.
         if let json = TIFFStack.parseJSON(desc) {
             let shape = (json["shape"] as? [Any])?.compactMap { ($0 as? NSNumber)?.intValue } ?? []
             let axes = (json["axes"] as? String) ?? (shape.count == 5 ? "TCZYX" : "")
@@ -54,7 +54,7 @@ public final class TIFFStack: @unchecked Sendable {
             if sizes.t * sizes.c * sizes.z != n {
                 sizes = (n, 1, 1)
             }
-            // Row-major over the axes as written (T slowest, then C, then Z).
+            // The pages follow the axes as written, with T slowest, then C, then Z.
             let ordered = axes.filter { "TCZ".contains($0) }
             order = "XY" + String(ordered.reversed())
             if let ch = json["Channel"] as? [String: Any], let names = ch["Name"] {
@@ -66,7 +66,7 @@ public final class TIFFStack: @unchecked Sendable {
                                      timeIncrement: (json["TimeIncrement"] as? NSNumber)?.doubleValue)
             }
         } else if desc.contains("<OME"), let px = OMEXML.parse(desc) {
-            // 2. OME-XML.
+            // Next try OME-XML.
             ome = desc
             order = px.dimensionOrder
             sizes = (px.sizeT, px.sizeC, px.sizeZ)
@@ -76,7 +76,7 @@ public final class TIFFStack: @unchecked Sendable {
             }
             meta = OMEXML.metadata(from: px, channelCount: sizes.c)
         } else if desc.hasPrefix("ImageJ=") {
-            // 3. ImageJ hyperstack: C fastest, then Z, then T.
+            // Next try an ImageJ hyperstack, where C varies fastest, then Z, then T.
             var kv: [String: String] = [:]
             for line in desc.split(separator: "\n") {
                 let parts = line.split(separator: "=", maxSplits: 1)
@@ -93,7 +93,7 @@ public final class TIFFStack: @unchecked Sendable {
                                  physicalSizeZ: Double(kv["spacing"] ?? "") ?? 1,
                                  timeIncrement: Double(kv["finterval"] ?? ""))
         } else {
-            // 4. Plain multi-page TIFF: one plane per timepoint.
+            // Otherwise treat the file as a plain TIFF with one plane for each timepoint.
             sizes = (n, 1, 1)
         }
 
@@ -103,7 +103,7 @@ public final class TIFFStack: @unchecked Sendable {
         metadata = meta ?? ImageMetadata(channelNames: (0..<sizes.c).map { "ch\($0)" },
                                          physicalSizeX: 1, physicalSizeY: 1, physicalSizeZ: 1, timeIncrement: nil)
 
-        // Page strides from the dimension order (first letter after XY varies fastest).
+        // Work out the page strides from the dimension order. The first letter after XY varies fastest.
         var stride = 1
         var sT = 0, sC = 0, sZ = 0
         let letters = Array(order.uppercased().dropFirst(2))
@@ -135,7 +135,7 @@ public final class TIFFStack: @unchecked Sendable {
         firstPage + ti * strideT + ci * strideC + zi * strideZ
     }
 
-    /// Read timepoint `ti` as a (C, Z, Y, X) volume in the file's sample type.
+    /// Read timepoint `ti` as a (C, Z, Y, X) volume in the sample type of the file.
     public func readFrame(_ ti: Int) throws -> Volume {
         let v = Volume(c: c, z: z, y: y, x: x, type: sampleType)
         try readFrame(ti, into: v)

@@ -1,7 +1,7 @@
 import Foundation
 import Yams
 
-/// Ordered YAML value for writing files in the same style as `yaml.dump(..., default_flow_style=False, sort_keys=False)`.
+/// An ordered YAML value for writing files in the style of `yaml.dump(..., default_flow_style=False, sort_keys=False)`.
 public indirect enum YAMLValue: Equatable {
     case map([(String, YAMLValue)])
     case seq([YAMLValue])
@@ -54,7 +54,7 @@ public enum YAMLWriter {
                     out += " " + scalar(value) + "\n"
                 } else if case .seq = value {
                     out += "\n"
-                    emit(value, indent: indent, into: &out, inSeq: false)  // PyYAML: indentless sequences in mappings
+                    emit(value, indent: indent, into: &out, inSeq: false)  // PyYAML does not indent sequences inside mappings.
                 } else {
                     out += "\n"
                     emit(value, indent: indent + 2, into: &out, inSeq: false)
@@ -95,7 +95,7 @@ public enum YAMLWriter {
         }
     }
 
-    /// Plain when PyYAML would write the string plain, else quoted.
+    /// Write the string plain when PyYAML would, and quoted otherwise.
     static func quote(_ s: String) -> String {
         if !s.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value < 0x7F }) {
             var o = "\""
@@ -121,7 +121,8 @@ public enum YAMLWriter {
         if s.isEmpty { return true }
         let specials: Set<Character> = ["-", "?", ":", ",", "[", "]", "{", "}", "#", "&", "*", "!", "|", ">", "'", "\"", "%", "@", "`"]
         if let f = s.first, specials.contains(f) || f == " " {
-            // "-", "?", ":" followed by a non-space may be plain (e.g. "-x"), but quoting is always safe.
+            // A "-", "?" or ":" followed by a character other than a space may be plain, for example "-x", but
+            // quoting is always safe.
             return true
         }
         if s.last == " " || s.last == ":" { return true }
@@ -139,7 +140,7 @@ public enum YAMLWriter {
     }
 }
 
-/// Loosely typed view of a YAML document read with Yams.
+/// A loosely typed view of a YAML document read with Yams.
 public enum YAMLReader {
     public static func load(_ text: String) throws -> Any? {
         try Yams.load(yaml: text)

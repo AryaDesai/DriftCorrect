@@ -33,7 +33,7 @@ struct DriftCorrectApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Needed when the executable runs outside an .app bundle (swift run).
+        // This is needed when the executable runs outside an .app bundle, for example with `swift run`.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }

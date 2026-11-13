@@ -1,24 +1,24 @@
 import Foundation
 
-/// The heavy per-frame operations. `CPUBackend` is the exact reference;
-/// `MetalBackend` (DCApple) runs the same operations on the GPU.
+/// The heavy operations that run on every frame. `CPUBackend` is the exact reference, and `MetalBackend` in
+/// DCApple runs the same operations on the GPU.
 ///
 /// Implementations must be safe to call from several threads at once.
 public protocol ComputeBackend: AnyObject {
     var name: String { get }
 
-    /// `scipy.ndimage.gaussian_filter(image, sigma)` for a float32 image.
+    /// Blur a float32 image as `scipy.ndimage.gaussian_filter(image, sigma)` does.
     func gaussian(_ image: Image2D, sigma: Double) throws -> Image2D
 
-    /// Max over Z of one channel of a (C, Z, Y, X) frame, as float32.
+    /// Return the maximum over Z of one channel of a (C, Z, Y, X) frame as float32.
     func maxProjectZ(_ frame: Volume, channel: Int) throws -> Image2D
 
-    /// Max over Z of every channel.
+    /// Return the maximum over Z of every channel.
     func maxProjectAll(_ frame: Volume) throws -> [Image2D]
 
-    /// Shift every plane onto the frame's canvas plus `pad` and convert to uint16
-    /// (`scipy.ndimage.shift(order=1, mode="constant")` or whole-pixel shift, then
-    /// `clip(0, 65535).astype(np.uint16)`).
+    /// Shift every plane onto the canvas of the frame plus `pad` and convert the result to uint16. The shift is
+    /// `scipy.ndimage.shift(order=1, mode="constant")` or a shift by whole pixels, followed by
+    /// `clip(0, 65535).astype(np.uint16)`.
     func shift(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) throws -> Volume
 }
 
@@ -49,7 +49,7 @@ public final class CPUBackend: ComputeBackend {
     }
 }
 
-/// XY centroid detection shared by the Mask tool and alignment.
+/// The detection of the xy centroid, which the Mask tool and the alignment share.
 public enum Detection {
     public struct Result {
         public var dy: Double
@@ -59,7 +59,7 @@ public enum Detection {
         public var mask: Mask2D?
     }
 
-    /// `compute_shift_xy(frame, sigma, percentile, ch_idx, method, block_size, invert, levels, selected_levels)`.
+    /// Find the mask and the shift as `compute_shift_xy` does in the Python scripts, with the same settings.
     public static func computeShift(frame: Volume, params: ThresholdParams, backend: ComputeBackend) throws -> Result {
         guard params.channelIndex >= 0 && params.channelIndex < frame.c else {
             throw DCError("Threshold channel index \(params.channelIndex) is out of range (the data has \(frame.c) channel(s))")
@@ -74,9 +74,9 @@ public enum Detection {
     }
 }
 
-/// Grayscale movie output. `DCApple.HEVCMovieWriter` implements it with VideoToolbox.
+/// The output of a grayscale movie. `DCApple.HEVCMovieWriter` implements it with VideoToolbox.
 public protocol MovieWriter: AnyObject {
-    /// Append one uint8 gray frame (row-major, `width * height`).
+    /// Append one uint8 gray frame of `width * height` pixels, stored row by row.
     func append(gray: [UInt8]) throws
     /// Finish the file and move it to its final path.
     func finish() throws
@@ -88,8 +88,8 @@ public protocol MovieWriterFactory {
     func makeWriter(url: URL, width: Int, height: Int, fps: Double) throws -> MovieWriter
 }
 
-/// Channel movies of one output stack: gray frames made with `auto_contrast`
-/// of the Z max-projection (`tiff_to_mp4`).
+/// The channel movies of one output stack. The gray frames are made with `auto_contrast` of the maximum
+/// projection along z, as `tiff_to_mp4` does.
 public final class ChannelMovies {
     private var writers: [MovieWriter]
     public let urls: [URL]
@@ -105,7 +105,7 @@ public final class ChannelMovies {
         self.urls = urls
     }
 
-    /// Frames for every channel from the per-channel projections.
+    /// Return the frame of every channel from the projection of that channel.
     public static func grayFrames(_ projections: [Image2D]) -> [[UInt8]] {
         var out = [[UInt8]](repeating: [], count: projections.count)
         let lock = NSLock()

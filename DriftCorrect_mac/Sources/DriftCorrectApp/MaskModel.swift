@@ -16,7 +16,7 @@ enum MaskMethod: String, CaseIterable, Identifiable {
     }
 }
 
-/// One preview request (a snapshot of the controls).
+/// One preview request, which is a snapshot of the controls.
 struct PreviewRequest {
     var source: ProjectionSource
     var t: Int
@@ -31,8 +31,8 @@ struct PreviewOutput {
     var error: String?
 }
 
-/// Computes previews off the main thread. When requests arrive faster than
-/// they finish, only the newest waiting request runs ("latest wins").
+/// Computes previews off the main thread. When requests arrive faster than they finish, only the newest
+/// waiting request runs.
 final class PreviewWorker: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dc.mask.preview", qos: .userInitiated)
     private let lock = NSLock()
@@ -70,7 +70,7 @@ final class PreviewWorker: @unchecked Sendable {
                                                  classCache: &classCache, cacheKey: key)
             let rgba = MaskPreview.renderComposite(raw: raw, mask: result.mask, centroid: result.centroid,
                                                    classMap: result.classMap)
-            // Look ahead: the next timepoint is likely next (slider drag or playback).
+            // Load the next timepoint ahead of time, because a slider drag or playback is likely to ask for it.
             r.source.prefetch(t: r.t + 1, p: r.p)
             return PreviewOutput(image: makeImage(rgba, width: raw.width, height: raw.height),
                                  caption: result.caption, histogram: result.histogram, error: nil)
@@ -88,7 +88,7 @@ final class PreviewWorker: @unchecked Sendable {
     }
 }
 
-/// State of the Mask tool window (find_threshold.py ThresholdApp).
+/// The state of the Mask tool window, which is ThresholdApp in find_threshold.py.
 @MainActor
 final class MaskModel: ObservableObject {
     // File
@@ -105,11 +105,11 @@ final class MaskModel: ObservableObject {
     @Published var method: MaskMethod = .percentile { didSet { if oldValue != method { methodChanged() } } }
     @Published var levels = 3 { didSet { if oldValue != levels { rebuildLevelChecks(); update() } } }
     @Published var levelChecks: [Bool] = [false, false, true]
-    /// Percentile in half-percent steps (20...199 → 10.0...99.5).
+    /// The percentile in steps of half a percent. The values 20 to 199 stand for 10.0 to 99.5.
     @Published var percentileSteps = 180 { didSet { if oldValue != percentileSteps { update() } } }
     @Published var invert = false { didSet { if oldValue != invert { update() } } }
 
-    // Per-timepoint overrides
+    // Overrides for single timepoints
     @Published private(set) var custom: [Int: ThresholdParams] = [:]
     @Published var rangeStart = 0
     @Published var rangeEnd = 0
@@ -180,8 +180,8 @@ final class MaskModel: ObservableObject {
         update()
     }
 
-    /// One checkbox per class; selection resets to the brightest class
-    /// (class indices mean different intensity bands for another level count).
+    /// One checkbox for each class. The selection resets to the brightest class, because the class indices
+    /// stand for different intensity bands when the number of levels changes.
     private func rebuildLevelChecks() {
         levelChecks = (0..<levels).map { $0 == levels - 1 }
     }
@@ -192,7 +192,7 @@ final class MaskModel: ObservableObject {
         update()
     }
 
-    /// `_current_params()`.
+    /// Return the current settings, as `_current_params()` does.
     func currentParams() -> ThresholdParams {
         ThresholdParams(channel: channelName, channelIndex: channelIndex, sigma: Double(sigma), percentile: percentile,
                         method: method.code, blockSize: 64, invert: invert, levels: levels,
@@ -218,7 +218,7 @@ final class MaskModel: ObservableObject {
 
     var customizedText: String { "Customized: \(custom.count) / \(T) T" }
 
-    /// Recompute the mask and redraw (`_update`).
+    /// Recompute the mask and redraw, as `_update` does.
     func update() {
         guard let src = source else { return }
         let p = currentParams()

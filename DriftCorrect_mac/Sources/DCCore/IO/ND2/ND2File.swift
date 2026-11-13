@@ -1,11 +1,10 @@
 import Foundation
 
-/// Native reader for Nikon ND2 files (format versions 2.x and 3.x).
+/// A reader for Nikon ND2 files of format versions 2.x and 3.x.
 ///
-/// Ported from the chunk-map, CLX-variant and experiment-loop logic of the
-/// open-source `nd2` Python package, which `nd2_to_tif.py`,
-/// `find_threshold.py` and `centroid_align_xy.py` use through
-/// `nd2.ND2File`. Legacy JPEG-2000 ND2 files (format 1.0) are not supported.
+/// It is ported from the chunk map, CLX variant and experiment loop logic of the open source `nd2` Python
+/// package, which `nd2_to_tif.py`, `find_threshold.py` and `centroid_align_xy.py` use through `nd2.ND2File`.
+/// Legacy ND2 files of format 1.0, which use JPEG 2000, are not supported.
 public final class ND2File: @unchecked Sendable {
     public enum LoopType: Int {
         case unknown = 0, timeLoop = 1, xyPosLoop = 2, xyDiscrLoop = 3, zStackLoop = 4
@@ -37,7 +36,7 @@ public final class ND2File: @unchecked Sendable {
         public var bitsPerComponentInMemory: Int
         public var bitsPerComponentSignificant: Int
         public var sequenceCount: Int
-        /// "lossless", "lossy", "none" or nil (eCompression 0, 1, 2 / other).
+        /// One of "lossless", "lossy" and "none" for eCompression 0, 1 and 2, or nil for any other value.
         public var compressionType: String?
     }
 
@@ -55,15 +54,15 @@ public final class ND2File: @unchecked Sendable {
     public private(set) var loops: [Loop] = []
     public private(set) var channelNames: [String] = []
     public private(set) var voxelSize = VoxelSize(x: 1, y: 1, z: 1)
-    /// `periodMs / 1000` of the first TimeLoop, as `load_nd2` computes it.
+    /// The `periodMs / 1000` of the first TimeLoop, as `load_nd2` computes it.
     public private(set) var periodSeconds: Double?
     public private(set) var sampleType: SampleType = .uint16
 
-    /// Axis sizes as the pipeline uses them: (T, P, Z, C, Y, X); missing axes are 1.
+    /// The axis sizes as the pipeline uses them, in the order (T, P, Z, C, Y, X). A missing axis has size 1.
     public private(set) var sizeT = 1, sizeP = 1, sizeZ = 1, sizeC = 1
     public var sizeY: Int { attributes.heightPx }
     public var sizeX: Int { attributes.widthPx }
-    /// Axis letters of the non-singleton loops, outermost first (`ND2File.sizes` order).
+    /// The axis letters of the loops longer than 1, outermost first, which is the order of `ND2File.sizes`.
     public private(set) var loopAxes: [Character] = []
     private var loopCounts: [Int] = []
     private var frameChunkOffsets: [Int: UInt64] = [:]
@@ -92,20 +91,20 @@ public final class ND2File: @unchecked Sendable {
         let minor = Int(String(UnicodeScalar(head[48 + 5]))) ?? 0
         version = (major, minor)
 
-        // Placeholder values; replaced below.
+        // These are placeholder values that are replaced below.
         attributes = Attributes(widthPx: 0, heightPx: 0, widthBytes: 0, componentCount: 1,
                                 bitsPerComponentInMemory: 16, bitsPerComponentSignificant: 16,
                                 sequenceCount: 0, compressionType: nil)
         try readChunkMap()
 
         let v3 = version.major >= 3
-        // Picture metadata (channels, calibration).
+        // Read the picture metadata, which holds the channels and the calibration.
         let rawMetaTop = try decodeChunk(v3 ? "ImageMetadataSeqLV|0!" : "ImageMetadataSeq|0!")
         let rawMeta = rawMetaTop["SLxPictureMetadata"]?.dict ?? rawMetaTop
         let planesDict = rawMeta["sPicturePlanes"]?.dict ?? CLXDict()
         let channelCount = planesDict["uiCount"]?.int ?? 1
 
-        // Attributes.
+        // Read the attributes.
         let attrsTop = try decodeChunk(v3 ? "ImageAttributesLV!" : "ImageAttributes!")
         let a = attrsTop["SLxImageAttributes"]?.dict ?? attrsTop
         func req(_ k: String) throws -> Int {
@@ -130,7 +129,7 @@ public final class ND2File: @unchecked Sendable {
             throw DCError("\(url.lastPathComponent) uses lossy compression, which is not supported.")
         }
 
-        // Experiment loops.
+        // Read the experiment loops.
         let expKey = v3 ? "ImageMetadataLV!" : "ImageMetadata!"
         if chunkMap[expKey] != nil {
             let expTop = try decodeChunk(expKey)
@@ -138,14 +137,14 @@ public final class ND2File: @unchecked Sendable {
             loops = try ND2File.loadExperiment(exp, level: 0, dest: [])
         }
 
-        // Channel names: sPicturePlanes.sPlaneNew (or sPlane) values, sDescription.
+        // The channel names are the sDescription of the values of sPicturePlanes.sPlaneNew, or of sPlane.
         let rawPlanes = (planesDict["sPlaneNew"]?.dict).flatMap { $0.isEmpty ? nil : $0 } ?? planesDict["sPlane"]?.dict ?? CLXDict()
         channelNames = rawPlanes.values.map { $0["sDescription"]?.string ?? "" }
         if channelNames.count < channelCount {
             channelNames += (channelNames.count..<channelCount).map { "ch\($0)" }
         }
 
-        // Voxel size: channels[0].volume.axesCalibration.
+        // The voxel size is channels[0].volume.axesCalibration.
         if !rawPlanes.isEmpty {
             let cal = rawMeta["dCalibration"]?.double ?? 1.0
             var zCal = 1.0
@@ -154,7 +153,7 @@ public final class ND2File: @unchecked Sendable {
         }
         periodSeconds = loops.first(where: { $0.type == .timeLoop })?.periodMs.map { $0 / 1000.0 }
 
-        // Axis sizes (ND2File.sizes, keeping singletons as 1).
+        // Work out the axis sizes as `ND2File.sizes` does, keeping an axis of length 1 as 1.
         let perChannel = attributes.componentCount / max(1, channelCount)
         if perChannel == 3 {
             throw DCError("\(url.lastPathComponent) is an RGB ND2 file; only monochrome channels are supported.")
@@ -168,7 +167,8 @@ public final class ND2File: @unchecked Sendable {
         for (axis, count) in seen where count != 1 && axis == "U" {
             throw DCError("\(url.lastPathComponent) has a custom loop axis (U=\(count)), which the pipeline does not support.")
         }
-        // Coordinate shape: one entry per distinct axis, in first-seen loop order, singletons removed.
+        // The coordinate shape has one entry for each distinct axis, in the order the loops first appear, without
+        // the axes of length 1.
         var order: [Character] = []
         for loop in loops where !order.contains(loop.type.axis) { order.append(loop.type.axis) }
         loopAxes = order.filter { (seen[$0] ?? 1) != 1 }
@@ -279,7 +279,7 @@ public final class ND2File: @unchecked Sendable {
         return try CLXLite.decode(data)
     }
 
-    // MARK: Experiment loops (nd2._parse._parse.load_experiment)
+    // MARK: Experiment loops, as in nd2._parse._parse.load_experiment
 
     static func loadExperiment(_ src: CLXDict, level: Int, dest: [Loop]) throws -> [Loop] {
         var dest = dest
@@ -297,7 +297,7 @@ public final class ND2File: @unchecked Sendable {
                 if prev.count < loop.count { dest[dest.count - 1] = loop }
             }
         }
-        // NETimeLoop sub-loop special case (nd2 issue #190).
+        // Handle the special case of a loop nested inside NETimeLoop, which is issue 190 of nd2.
         if let pars = src["uLoopPars"]?.dict, let sub = pars["pSubLoops"]?.dict,
            let first = sub["i0000000000"]?.dict, let next = first["ppNextLevelEx"]?.dict,
            let firstNext = next["i0000000000"]?.dict, let exp = firstNext["SLxExperiment"]?.dict {
@@ -376,7 +376,8 @@ public final class ND2File: @unchecked Sendable {
 
     // MARK: Frames
 
-    /// Sequence index of loop coordinates (numpy `ravel_multi_index` over the non-singleton loops).
+    /// Return the sequence index of loop coordinates, as `ravel_multi_index` of numpy does over the loops longer than
+    /// 1.
     public func sequenceIndex(t: Int, p: Int, z: Int) -> Int {
         var index = 0
         for (axis, count) in zip(loopAxes, loopCounts) {
@@ -392,7 +393,7 @@ public final class ND2File: @unchecked Sendable {
         return index
     }
 
-    /// Byte layout of one stored frame: rows of `widthBytes`, samples interleaved by component.
+    /// The byte layout of one stored frame, which is rows of `widthBytes` with the samples interleaved by component.
     private var frameBytes: Int { attributes.heightPx * attributes.widthBytes }
 
     /// Read frame `seq` as interleaved (Y, X, component) samples without row padding.
@@ -400,7 +401,7 @@ public final class ND2File: @unchecked Sendable {
         let bpp = attributes.bitsPerComponentInMemory / 8
         let rowOut = attributes.widthPx * attributes.componentCount * bpp
         var out = [UInt8](repeating: 0, count: rowOut * attributes.heightPx)
-        guard let chunkOffset = frameChunkOffsets[seq] else { return out }  // missing frame: zeros
+        guard let chunkOffset = frameChunkOffsets[seq] else { return out }  // A missing frame stays zeros.
         let (dataStart, dataLength) = try chunkData(at: chunkOffset)
         var stored: [UInt8]
         if attributes.compressionType == "lossless" {
@@ -456,8 +457,8 @@ public final class ND2File: @unchecked Sendable {
         }
     }
 
-    /// Read one timepoint of one position as a (C, Z, Y, X) volume
-    /// (`data[t, p].transpose(1, 0, 2, 3)` in the Python code).
+    /// Read one timepoint of one position as a (C, Z, Y, X) volume, which is `data[t, p].transpose(1, 0, 2, 3)` in
+    /// the Python code.
     public func readFrame(t: Int, p: Int) throws -> Volume {
         let v = Volume(c: sizeC, z: sizeZ, y: sizeY, x: sizeX, type: sampleType)
         for zi in 0..<sizeZ { try readPlanes(t: t, p: p, z: zi, into: v) }

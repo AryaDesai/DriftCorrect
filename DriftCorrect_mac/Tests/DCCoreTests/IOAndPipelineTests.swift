@@ -14,7 +14,7 @@ final class IOAndPipelineTests: XCTestCase {
         try? FileManager.default.removeItem(at: tmp)
     }
 
-    /// Flat samples of a stack in (T, C, Z, Y, X) order, as Float.
+    /// Return the samples of a stack as one Float array in (T, C, Z, Y, X) order.
     func samples(_ s: TIFFStack) throws -> [Float] {
         var out: [Float] = []
         for t in 0..<s.t {
@@ -69,12 +69,12 @@ final class IOAndPipelineTests: XCTestCase {
             let vox = (c["vox"] as! [NSNumber]).map { $0.doubleValue }
             XCTAssertEqual(f.voxelSize, VoxelSize(x: vox[0], y: vox[1], z: vox[2]))
             XCTAssertEqual(f.periodSeconds, (c["period"] as? NSNumber)?.doubleValue)
-            // Data (T, P, Z, C, Y, X) against the nd2 package.
+            // Compare the data in (T, P, Z, C, Y, X) order with the output of the nd2 package.
             let expected = Ref.load(c["data"], as: UInt16.self)
             var got: [UInt16] = []
             for t in 0..<f.sizeT {
                 for p in 0..<f.sizeP {
-                    let v = try f.readFrame(t: t, p: p)  // (C, Z, Y, X)
+                    let v = try f.readFrame(t: t, p: p)  // The volume is (C, Z, Y, X).
                     for z in 0..<f.sizeZ {
                         for ch in 0..<f.sizeC {
                             let ptr = v.planePointer(c: ch, z: z).assumingMemoryBound(to: UInt16.self)
@@ -103,7 +103,7 @@ final class IOAndPipelineTests: XCTestCase {
             XCTAssertEqual(a.metadata.channelNames, b.metadata.channelNames, name)
             XCTAssertEqual(a.metadata.voxel, b.metadata.voxel, name)
             XCTAssertEqual(a.metadata.timeIncrement, b.metadata.timeIncrement, name)
-            // Python writes the concatenated files as float32; the values must be equal.
+            // Python writes the concatenated files as float32, and the values must be equal.
             XCTAssertEqual(try samples(a), try samples(b), name)
             XCTAssertEqual(a.sampleType, .uint16, name)
         }
@@ -125,7 +125,7 @@ final class IOAndPipelineTests: XCTestCase {
             try FileManager.default.removeItem(at: url)
         }
 
-        // Concatenation alone: no ND2 files are needed, and no per-file TIFF is rewritten.
+        // Concatenation alone needs no ND2 files and rewrites none of the TIFFs it joins.
         for nd2 in globFiles(input, pattern: "*.nd2") { try FileManager.default.removeItem(at: nd2) }
         opts.concatOnly = true
         try ConvertPipeline(options: opts, context: .silent()).run()
@@ -138,7 +138,7 @@ final class IOAndPipelineTests: XCTestCase {
         let src = Ref.url("align")
         let work = tmp.appendingPathComponent("align")
         try FileManager.default.copyItem(at: src, to: work)
-        // The YAML refers to the TIFF by absolute path; point it at the copy.
+        // The YAML refers to the TIFF by absolute path, so point it at the copy.
         for name in ["percentile.yaml", "multi.yaml"] {
             let u = work.appendingPathComponent(name)
             var text = try String(contentsOf: u, encoding: .utf8)
@@ -155,7 +155,7 @@ final class IOAndPipelineTests: XCTestCase {
             let outTIF = work.appendingPathComponent("aligned_P0_concat/P0_concat_xy.ome.tif")
             let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
             let expectedShifts = (c["shifts"] as! [[NSNumber]]).map { $0.map { $0.doubleValue } }
-            let tolerance = yamlName == "percentile.yaml" ? 0.0051 : 1e-12  // the worker logs 2 decimals
+            let tolerance = yamlName == "percentile.yaml" ? 0.0051 : 1e-12  // The worker logs 2 decimals.
             for (s, e) in zip(r.shifts[0], expectedShifts) {
                 XCTAssertEqual(s.dy, e[0], accuracy: tolerance)
                 XCTAssertEqual(s.dx, e[1], accuracy: tolerance)
@@ -185,7 +185,7 @@ final class IOAndPipelineTests: XCTestCase {
     }
 
     func testLZWAndPackBits() throws {
-        // "TOBEORNOTTOBEORTOBEORNOT" style round trip through a tiny LZW encoder.
+        // Encode a repetitive text with a small LZW encoder and decode it again.
         let input: [UInt8] = Array("TOBEORNOTTOBEORTOBEORNOT#TOBEORNOTTOBEORTOBEORNOT".utf8)
         let encoded = lzwEncode(input)
         XCTAssertEqual(try Decompress.lzw(encoded, expected: input.count), input)
@@ -195,7 +195,7 @@ final class IOAndPipelineTests: XCTestCase {
                                   0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA])
     }
 
-    /// Reference TIFF LZW encoder (MSB-first, early change) for the decoder test.
+    /// A reference TIFF LZW encoder for the decoder test. Codes start at the most significant bit and use early change.
     func lzwEncode(_ data: [UInt8]) -> [UInt8] {
         var dict: [[UInt8]: Int] = [:]
         for i in 0..<256 { dict[[UInt8(i)]] = i }
@@ -209,7 +209,7 @@ final class IOAndPipelineTests: XCTestCase {
             if dict[wc] != nil { w = wc; continue }
             put(dict[w]!)
             dict[wc] = next; next += 1
-            if next >= (1 << width) && width < 12 { width += 1 }  // encoder side of TIFF early change
+            if next >= (1 << width) && width < 12 { width += 1 }  // This is the encoder side of the early change of TIFF.
             w = [b]
         }
         if !w.isEmpty { put(dict[w]!) }

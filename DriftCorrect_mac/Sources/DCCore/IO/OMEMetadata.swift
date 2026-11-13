@@ -1,6 +1,6 @@
 import Foundation
 
-/// Physical calibration and channel names carried through every output file.
+/// The physical calibration and channel names that are carried through every output file.
 public struct ImageMetadata: Equatable, Sendable {
     public var channelNames: [String]
     public var physicalSizeX: Double?
@@ -12,12 +12,12 @@ public struct ImageMetadata: Equatable, Sendable {
     public var physicalSizeZUnit: String? = "µm"
     public var timeIncrementUnit: String? = "s"
     /// The stage z position of the first slice of every timepoint, in micrometres. It is nil when the file does not
-    /// record it. Kept for metadata and diagnostics; it does not determine Z correction.
+    /// record it. It is kept for the metadata and for checking results. It does not determine the z correction.
     public var stageZ: [Double]?
     /// The change in stage z from one slice to the next, in micrometres. It is negative when the stack was acquired
     /// from top to bottom.
     public var stageZStep: Double?
-    /// Original acquisition times retained when timepoints are omitted from the output.
+    /// The original acquisition time of every timepoint, which is kept when timepoints are left out of the output.
     public var timeOffsets: [Double]?
 
     public init(channelNames: [String], physicalSizeX: Double? = nil, physicalSizeY: Double? = nil,
@@ -29,7 +29,7 @@ public struct ImageMetadata: Equatable, Sendable {
         self.timeIncrement = timeIncrement
     }
 
-    /// Metadata as `save_ome_tiff` writes it: units always µm and s.
+    /// The metadata as `save_ome_tiff` writes it, where the units are always µm and s.
     public static func standard(channelNames: [String], voxel: VoxelSize, period: Double?) -> ImageMetadata {
         ImageMetadata(channelNames: channelNames, physicalSizeX: voxel.x, physicalSizeY: voxel.y,
                       physicalSizeZ: voxel.z, timeIncrement: period)
@@ -132,10 +132,10 @@ public enum OMEXML {
         }
     }
 
-    /// `load_tif_metadata` OME-XML branch, with each field parsed independently.
+    /// Read the metadata from OME-XML as `load_tif_metadata` does, with each field parsed on its own.
     ///
-    /// The Python code drops every value (channel names too) when any one of
-    /// PhysicalSizeX/Y/Z is missing. Here a missing size falls back to 1.0 alone.
+    /// The Python code drops every value, including the channel names, when any one of PhysicalSizeX, Y or Z is
+    /// missing. Here only the missing size falls back to 1.0.
     public static func metadata(from pixels: OMEPixels, channelCount: Int) -> ImageMetadata {
         var names: [String] = []
         for (i, n) in pixels.channelNames.enumerated() { names.append(n ?? "ch\(i)") }
@@ -176,7 +176,7 @@ public enum OMEXML {
         return out
     }
 
-    /// OME-XML in the form that tifffile writes for `save_ome_tiff`.
+    /// Return the OME-XML in the form that tifffile writes for `save_ome_tiff`.
     public static func build(t: Int, c: Int, z: Int, y: Int, x: Int, type: SampleType, metadata m: ImageMetadata) -> String {
         var px = "<Pixels ID=\"Pixels:0\" DimensionOrder=\"XYZCT\" Type=\"\(type.omeType)\""
         px += " SizeX=\"\(x)\" SizeY=\"\(y)\" SizeZ=\"\(z)\" SizeC=\"\(c)\" SizeT=\"\(t)\""

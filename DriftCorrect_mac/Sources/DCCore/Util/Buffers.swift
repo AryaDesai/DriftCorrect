@@ -19,10 +19,10 @@ public enum SampleType: String, Sendable, Equatable {
         }
     }
 
-    /// TIFF SampleFormat tag value (1 = unsigned integer, 3 = IEEE float).
+    /// The value of the TIFF SampleFormat tag, which is 1 for unsigned integers and 3 for IEEE floats.
     public var tiffSampleFormat: UInt16 { self == .float32 ? 3 : 1 }
 
-    /// OME-XML Pixels@Type value.
+    /// The value of the Type attribute of Pixels in OME-XML.
     public var omeType: String {
         switch self {
         case .uint8: return "uint8"
@@ -50,7 +50,7 @@ public enum SampleType: String, Sendable, Equatable {
     }
 }
 
-/// Page-aligned, manually managed memory.
+/// Memory that is aligned to pages and managed by hand.
 ///
 /// Page alignment lets the Metal backend wrap the same memory in an
 /// `MTLBuffer` without a copy (unified memory on Apple silicon).
@@ -59,7 +59,7 @@ public final class AlignedBuffer: @unchecked Sendable {
 
     /// Bytes requested by the caller.
     public let byteCount: Int
-    /// Bytes allocated: `byteCount` rounded up to a whole page, at least one page.
+    /// The bytes allocated, which is `byteCount` rounded up to a whole page and at least one page.
     public let capacity: Int
     public let raw: UnsafeMutableRawPointer
 
@@ -88,7 +88,7 @@ public final class AlignedBuffer: @unchecked Sendable {
     }
 }
 
-/// One timepoint of one position: a (C, Z, Y, X) block of samples, C-major.
+/// One timepoint of one position, stored as a (C, Z, Y, X) block of samples with the channel as the slowest axis.
 ///
 /// Plane (c, z) starts at element `(c * z + z) * y * x`, which is the page
 /// order that `save_ome_tiff` writes inside one timepoint.
@@ -127,7 +127,7 @@ public struct Volume: @unchecked Sendable {
         planePointer(planeIndex(c: ci, z: zi))
     }
 
-    /// Sample `i` of `plane`, converted to Float (exact for uint8/uint16).
+    /// Return sample `i` of `plane` converted to Float, which is exact for uint8 and uint16.
     @inline(__always)
     public func sample(plane: Int, index i: Int) -> Float {
         let p = planePointer(plane)
@@ -138,7 +138,7 @@ public struct Volume: @unchecked Sendable {
         }
     }
 
-    /// Copy one plane to a Float array (numpy `.astype(np.float32)`).
+    /// Copy one plane to a Float array, as `.astype(np.float32)` does in numpy.
     public func floatPlane(_ plane: Int) -> [Float] {
         var out = [Float](repeating: 0, count: planeElements)
         let n = planeElements
@@ -159,7 +159,7 @@ public struct Volume: @unchecked Sendable {
         return out
     }
 
-    /// Max over Z of channel `ci`, as Float (numpy `frame[c].max(axis=0)`).
+    /// Return the maximum over Z of channel `ci` as Float, as `frame[c].max(axis=0)` does in numpy.
     public func maxProjectZ(channel ci: Int) -> [Float] {
         var out = floatPlane(planeIndex(c: ci, z: 0))
         let n = planeElements
@@ -175,7 +175,7 @@ public struct Volume: @unchecked Sendable {
                         let s = p.assumingMemoryBound(to: UInt16.self)
                         for i in 0..<n { let v = Float(s[i]); if v > dst[i] { dst[i] = v } }
                     case .float32:
-                        // numpy max propagates NaN; inputs are finite here.
+                        // The max of numpy propagates NaN, but the inputs are finite here.
                         let s = p.assumingMemoryBound(to: Float.self)
                         for i in 0..<n { let v = s[i]; if v > dst[i] { dst[i] = v } }
                     }
@@ -186,7 +186,7 @@ public struct Volume: @unchecked Sendable {
     }
 }
 
-/// A 2-D float image in row-major (Y, X) order.
+/// A float image with two dimensions, stored row by row in (Y, X) order.
 public struct Image2D: Sendable, Equatable {
     public var width: Int
     public var height: Int
@@ -209,7 +209,7 @@ public struct Image2D: Sendable, Equatable {
     }
 }
 
-/// Boolean mask in row-major (Y, X) order.
+/// A boolean mask, stored row by row in (Y, X) order.
 public struct Mask2D: Sendable, Equatable {
     public var width: Int
     public var height: Int

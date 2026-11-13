@@ -8,12 +8,12 @@ enum Decompress {
     static func zlib(_ input: [UInt8], expected: Int) throws -> [UInt8] {
         #if canImport(Compression)
         var start = 0
-        // Skip a zlib header (CMF/FLG) when present. Apple's COMPRESSION_ZLIB is raw DEFLATE.
+        // Skip a zlib header (CMF and FLG) when present. COMPRESSION_ZLIB of Apple expects raw DEFLATE.
         if input.count >= 2 {
             let cmf = input[0], flg = input[1]
             if cmf & 0x0F == 8 && (UInt16(cmf) << 8 | UInt16(flg)) % 31 == 0 {
                 start = 2
-                if flg & 0x20 != 0 { start += 4 }  // preset dictionary id (not used by TIFF/ND2)
+                if flg & 0x20 != 0 { start += 4 }  // Skip the id of a preset dictionary, which TIFF and ND2 do not use.
             }
         }
         if input.count <= start { return [] }
@@ -48,11 +48,11 @@ enum Decompress {
         #endif
     }
 
-    /// TIFF LZW (compression = 5), MSB-first codes with early change.
+    /// Decode TIFF LZW, which is compression 5. Codes start at the most significant bit and use early change.
     static func lzw(_ input: [UInt8], expected: Int) throws -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(expected)
-        // Dictionary as (prefix code, last byte, length); strings rebuilt on demand.
+        // The dictionary holds (prefix code, last byte, length). Strings are rebuilt on demand.
         var prefix = [Int32](repeating: -1, count: 4096)
         var suffix = [UInt8](repeating: 0, count: 4096)
         var length = [Int32](repeating: 0, count: 4096)
@@ -77,7 +77,7 @@ enum Decompress {
         }
 
         func emit(_ code: Int) -> UInt8 {
-            // Write the string for `code`; return its first byte.
+            // Write the string for `code` and return its first byte.
             let n = Int(length[code])
             var c = code
             var i = n - 1
@@ -91,8 +91,8 @@ enum Decompress {
         }
 
         while let code = readCode() {
-            if code == 257 { break }  // EOI
-            if code == 256 {          // Clear
+            if code == 257 { break }  // This is the end of information code.
+            if code == 256 {          // This is the clear code.
                 next = 258; width = 9; old = -1
                 continue
             }
@@ -105,7 +105,7 @@ enum Decompress {
                 if code < next {
                     first = emit(code)
                 } else if code == next {
-                    // KwKwK case: string(old) + first(old)
+                    // In the KwKwK case the string is string(old) + first(old).
                     let n = Int(length[old])
                     var c = old
                     var i = n - 1
@@ -124,13 +124,13 @@ enum Decompress {
                 }
                 old = code
             }
-            // Early change: widen one code before the table fills the current width.
+            // With early change the width grows one code before the table fills the current width.
             if next + 1 >= (1 << width) && width < 12 { width += 1 }
         }
         return out
     }
 
-    /// PackBits (compression = 32773).
+    /// Decode PackBits, which is compression 32773.
     static func packBits(_ input: [UInt8], expected: Int) throws -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(expected)
