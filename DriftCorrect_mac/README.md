@@ -1,5 +1,8 @@
 # DriftCorrect for Macs
 
+For automatic setup, download and run the standalone installer using the
+[installation commands](../README.md#mac).
+
 This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `find_threshold.py`,
 `centroid_align_xy.py`, and their GUIs). It contains:
 

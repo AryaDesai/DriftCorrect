@@ -4,6 +4,11 @@ Tools to convert ND2 files, mask embryos, and align movies in xy with optional z
 
 ## Install
 
+For automatic setup from Anaconda Prompt, download and run the standalone
+installer using the [installation commands](../README.md#windows).
+
+For manual installation:
+
 1. Install Python 3.10 or later.
 2. Run `pip install -r requirements.txt`.
 3. For an NVIDIA GPU, also install CuPy for your CUDA version: `pip install cupy-cuda12x` or `pip install cupy-cuda13x`.
