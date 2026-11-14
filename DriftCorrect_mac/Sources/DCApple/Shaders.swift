@@ -1,8 +1,7 @@
 // The source of the compute kernels in the Metal Shading Language.
 //
-// scipy accumulates in float64. Apple GPUs have no float64, so the Gaussian and the bilinear shift use
-// arithmetic on pairs of floats. Each value is the unevaluated sum hi + lo of two floats, which holds about
-// 48 significant bits. Rounding that sum to float32 gives the same result as the float64 accumulation of
+// scipy accumulates in float64. Apple GPUs have no float64, so the Gaussian uses arithmetic on pairs of floats.
+// Each value is the unevaluated sum hi + lo of two floats, which holds about 48 significant bits. Rounding that sum to float32 gives the same result as the float64 accumulation of
 // scipy, except in the rare case where the exact value lies very close to the midpoint between two float32
 // values. The kernels must be compiled with fast math off, as MetalBackend does, or the error terms vanish.
 
@@ -120,79 +119,12 @@ kernel void gaussian_pass(device const float* src [[buffer(0)]],
     dst[(ulong)y * p.width + x] = ff_round(acc);
 }
 
-// Shift
-// The CPU prepares one table for the rows and one for the columns in float64. In each entry, idx.x is the
-// first source index on the padded canvas and idx.y is the second, which is clamped. w holds the weights
-// (w0, w1) as pairs of floats, and valid is 0 when the coordinate is outside the canvas.
-struct AxisEntry { int i0; int i1; int valid; int pad0; float2 w0; float2 w1; };
-struct ShiftParams {
-    uint outW; uint outH;         // The size of the canvas.
-    uint srcW; uint srcH;         // The size of the source frame.
-    int padTop; int padLeft;      // The place of the source on the canvas.
-    int iy; int ix;               // The shift in whole pixels.
-    uint planes;
-};
-
-inline float sample_u16(device const ushort* s, constant ShiftParams& p, uint plane, int cy, int cx) {
-    int sy = cy - p.padTop, sx = cx - p.padLeft;
-    if (sy < 0 || sy >= int(p.srcH) || sx < 0 || sx >= int(p.srcW)) return 0.0f;
-    return float(s[(ulong)plane * p.srcW * p.srcH + (ulong)sy * p.srcW + sx]);
-}
-inline float sample_f32(device const float* s, constant ShiftParams& p, uint plane, int cy, int cx) {
-    int sy = cy - p.padTop, sx = cx - p.padLeft;
-    if (sy < 0 || sy >= int(p.srcH) || sx < 0 || sx >= int(p.srcW)) return 0.0f;
-    return s[(ulong)plane * p.srcW * p.srcH + (ulong)sy * p.srcW + sx];
-}
-inline float sample_u8(device const uchar* s, constant ShiftParams& p, uint plane, int cy, int cx) {
-    int sy = cy - p.padTop, sx = cx - p.padLeft;
-    if (sy < 0 || sy >= int(p.srcH) || sx < 0 || sx >= int(p.srcW)) return 0.0f;
-    return float(s[(ulong)plane * p.srcW * p.srcH + (ulong)sy * p.srcW + sx]);
-}
-
 // Convert as clip(0, 65535).astype(np.uint16) does.
 inline ushort to_u16(float v) {
     if (!(v > 0.0f)) return 0;
     if (v >= 65535.0f) return 65535;
     return ushort(v);
 }
-
-#define SHIFT_KERNELS(SUFFIX, TYPE, SAMPLE) \
-kernel void shift_bilinear_##SUFFIX(device const TYPE* src [[buffer(0)]], \
-                                    device ushort* dst [[buffer(1)]], \
-                                    device const AxisEntry* rows [[buffer(2)]], \
-                                    device const AxisEntry* cols [[buffer(3)]], \
-                                    constant ShiftParams& p [[buffer(4)]], \
-                                    uint3 gid [[thread_position_in_grid]]) { \
-    const uint x = gid.x, y = gid.y, plane = gid.z; \
-    if (x >= p.outW || y >= p.outH || plane >= p.planes) return; \
-    const ulong o = (ulong)plane * p.outW * p.outH + (ulong)y * p.outW + x; \
-    AxisEntry ry = rows[y]; AxisEntry cx = cols[x]; \
-    if (ry.valid == 0 || cx.valid == 0) { dst[o] = 0; return; } \
-    float v00 = SAMPLE(src, p, plane, ry.i0, cx.i0); \
-    float v01 = SAMPLE(src, p, plane, ry.i0, cx.i1); \
-    float v10 = SAMPLE(src, p, plane, ry.i1, cx.i0); \
-    float v11 = SAMPLE(src, p, plane, ry.i1, cx.i1); \
-    float2 acc = ff_mul(ff_mul(float2(v00, 0.0f), ry.w0), cx.w0); \
-    acc = ff_add(acc, ff_mul(ff_mul(float2(v01, 0.0f), ry.w0), cx.w1)); \
-    acc = ff_add(acc, ff_mul(ff_mul(float2(v10, 0.0f), ry.w1), cx.w0)); \
-    acc = ff_add(acc, ff_mul(ff_mul(float2(v11, 0.0f), ry.w1), cx.w1)); \
-    dst[o] = to_u16(ff_round(acc)); \
-} \
-kernel void shift_integer_##SUFFIX(device const TYPE* src [[buffer(0)]], \
-                                   device ushort* dst [[buffer(1)]], \
-                                   constant ShiftParams& p [[buffer(4)]], \
-                                   uint3 gid [[thread_position_in_grid]]) { \
-    const uint x = gid.x, y = gid.y, plane = gid.z; \
-    if (x >= p.outW || y >= p.outH || plane >= p.planes) return; \
-    const ulong o = (ulong)plane * p.outW * p.outH + (ulong)y * p.outW + x; \
-    int yy = int(y) - p.iy, xx = int(x) - p.ix; \
-    if (yy < 0 || yy >= int(p.outH) || xx < 0 || xx >= int(p.outW)) { dst[o] = 0; return; } \
-    dst[o] = to_u16(SAMPLE(src, p, plane, yy, xx)); \
-}
-
-SHIFT_KERNELS(u16, ushort, sample_u16)
-SHIFT_KERNELS(f32, float, sample_f32)
-SHIFT_KERNELS(u8, uchar, sample_u8)
 
 // Shift and rotation
 // The CPU prepares one table entry for every output pixel. It holds the upper left of the four source pixels and

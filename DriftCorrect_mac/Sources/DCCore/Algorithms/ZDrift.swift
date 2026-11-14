@@ -39,13 +39,13 @@ public struct ZStep: Sendable {
 
 /// The shift of every timepoint in whole slices, and the number of empty slices to add.
 public struct ZPlan: Equatable, Sendable {
-    /// The position of the tissue relative to the reference timepoint, in slices. The value can be fractional.
+    /// The position of the tissue relative to the first timepoint, in slices. The value can be fractional.
     public var position: [Double]
     /// The number of slices to move each timepoint by. An input slice lands on output slice `input + shift + padLow`.
     public var shift: [Int]
     public var padLow: Int
     public var padHigh: Int
-    /// The timepoints that are written. The shifts still add up the movement of every timepoint.
+    /// The timepoints that are written.
     public var kept: [Int]
 }
 
@@ -390,36 +390,30 @@ public enum ZDrift {
     /// - Parameters:
     ///   - steps: The movement since the previous timepoint, with one value for each timepoint. The first value
     ///     is ignored.
-    ///   - reference: The timepoint whose slices stay where they are.
     ///   - deadBand: The shift changes only when the position is this far beyond the midpoint between two slices.
     ///     A position that stays close to a midpoint would otherwise make the output switch between two slices.
     ///   - pad: When true, empty slices are added so that no slice is lost. When false, slices that leave the
     ///     stack are dropped.
     ///   - positions: The position of the tissue at every timepoint. Without it the movements are added up.
-    public static func plan(steps: [Double], positions: [Double]? = nil, reference: Int = 0, deadBand: Double = 0.15,
-                            pad: Bool = true, maximumStep: Double? = nil) -> ZPlan {
+    public static func plan(steps: [Double], positions: [Double]? = nil, deadBand: Double = 0.15,
+                            pad: Bool = true) -> ZPlan {
         let T = steps.count
         guard T > 0 else { return ZPlan(position: [], shift: [], padLow: 0, padHigh: 0, kept: []) }
         // Take the position of the tissue at every timepoint, or add up the movements to get it. It is then made
-        // relative to the reference timepoint.
+        // relative to the first timepoint.
         var pos = [Double](repeating: 0, count: T)
         if let given = positions, given.count == T { pos = given } else { for t in 1..<max(1, T) { pos[t] = pos[t - 1] + steps[t] } }
-        let ref = min(max(0, reference), T - 1)
-        let p0 = pos[ref]
+        let p0 = pos[0]
         pos = pos.map { $0 - p0 }
-        // Follow the position in whole slices, forward and then backward from the reference timepoint.
+        // Follow the position in whole slices from the first timepoint.
         var whole = [Int](repeating: 0, count: T)
-        func follow(_ t: Int, from previous: Int) -> Int {
-            abs(pos[t] - Double(previous)) >= 0.5 + deadBand ? Int(pos[t].rounded()) : previous
+        for t in 1..<max(1, T) {
+            whole[t] = abs(pos[t] - Double(whole[t - 1])) >= 0.5 + deadBand ? Int(pos[t].rounded()) : whole[t - 1]
         }
-        if ref + 1 < T { for t in (ref + 1)..<T { whole[t] = follow(t, from: whole[t - 1]) } }
-        if ref > 0 { for t in stride(from: ref - 1, through: 0, by: -1) { whole[t] = follow(t, from: whole[t + 1]) } }
         // The correction moves each timepoint opposite to the movement of the tissue.
         let shift = whole.map { -$0 }
-        let kept = (0..<T).filter { $0 == 0 || maximumStep == nil || abs(steps[$0]) <= maximumStep! }
-        let retainedShifts = kept.map { shift[$0] }
-        return ZPlan(position: pos, shift: shift, padLow: pad ? max(0, -(retainedShifts.min() ?? 0)) : 0,
-                     padHigh: pad ? max(0, retainedShifts.max() ?? 0) : 0, kept: kept)
+        return ZPlan(position: pos, shift: shift, padLow: pad ? max(0, -(shift.min() ?? 0)) : 0,
+                     padHigh: pad ? max(0, shift.max() ?? 0) : 0, kept: Array(0..<T))
     }
 
     /// Move the slices of `v` by `shift` inside a stack that has `padLow` + `padHigh` extra slices. An output slice

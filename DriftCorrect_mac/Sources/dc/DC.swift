@@ -6,14 +6,14 @@ import Foundation
 import CryptoKit
 #endif
 
-/// The command line tool. The `convert` and `align` commands take the same arguments as nd2_to_tif.py and
-/// centroid_align_xy.py. Both spellings `--output_dir` and `--output-dir` work.
+/// The command line tool. Options that are written with dashes can also be written with underscores, such as
+/// `--output_dir` and `--output-dir`.
 @main
 struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dc",
         abstract: "Embryo drift-correction tools (Apple silicon).",
-        subcommands: [Convert.self, Align.self, CorrectZ.self, ZShifts.self, ND2Info.self, Bench.self])
+        subcommands: [Convert.self, Align.self, CorrectZ.self, Export.self, ND2Info.self, Bench.self])
 }
 
 struct BackendOption: ParsableArguments {
@@ -74,7 +74,7 @@ func parseRegion(_ region: String?, box: String?, prefix: String, default fallba
     }
 }
 
-/// The z correction settings that `align --z-correct`, `correct-z` and `z-shifts` share.
+/// The z correction settings that `align --z-correct` and `correct-z` share.
 struct ZOptionGroup: ParsableArguments {
     @Option(name: [.customLong("z-channel"), .customLong("z_channel")],
             help: "The channel to follow in z, given as a name or as an index that starts at 0. A nuclear marker is the best choice. The default is the threshold channel of the YAML file, or channel 0 when there is no YAML file.")
@@ -89,7 +89,7 @@ struct ZOptionGroup: ParsableArguments {
     var zBox: String?
 
     @Option(name: [.customLong("z-drop-above"), .customLong("z_drop_above")],
-            help: "Leave out timepoints whose movement from the timepoint before them exceeds this many slices.")
+            help: "Leave out timepoints whose movement from the last kept timepoint exceeds this many slices.")
     var zDropAbove: Double?
 
     @Option(name: [.customLong("z-span"), .customLong("z_span")],
@@ -112,12 +112,8 @@ struct ZOptionGroup: ParsableArguments {
     }
 }
 
-/// The settings of the xy alignment by image matching, which `align --xy-method image` selects.
+/// The settings of the xy alignment by image matching.
 struct XYOptionGroup: ParsableArguments {
-    @Option(name: [.customLong("xy-method"), .customLong("xy_method")],
-            help: "centroid centres the centroid of the embryo mask (default). image matches the image of each timepoint with the timepoint before it.")
-    var xyMethod = "centroid"
-
     @Option(name: [.customLong("xy-channel"), .customLong("xy_channel")],
             help: "The channel that image matching compares, given as a name or as an index that starts at 0. A nuclear marker is the best choice. The default is the threshold channel of the YAML file.")
     var xyChannel: String?
@@ -146,26 +142,21 @@ struct XYOptionGroup: ParsableArguments {
           help: "Do not correct rotation. Image matching then only shifts.")
     var xyNoRotation = false
 
-    func make() throws -> XYMatchOptions? {
-        switch xyMethod.lowercased() {
-        case "centroid": return nil
-        case "image":
-            var o = XYMatchOptions()
-            (o.channelIndex, o.channelName) = parseChannel(xyChannel)
-            o.region = try parseRegion(xyRegion, box: xyBox, prefix: "xy", default: .wholeFrame)
-            o.holdInPlace = !xyNoHold
-            if let v = xySmoothing {
-                guard v.isFinite, v >= 0 else { throw ValidationError("--xy-smoothing must be 0 or a positive number of timepoints") }
-                o.smoothing = v
-            }
-            if let v = xyMaxAngle {
-                guard v.isFinite, v >= 0 else { throw ValidationError("--xy-max-angle must be 0 or a positive number of degrees") }
-                o.maximumAngle = v
-            }
-            if xyNoRotation { o.maximumAngle = 0 }
-            return o
-        default: throw ValidationError("--xy-method must be centroid or image")
+    func make() throws -> XYMatchOptions {
+        var o = XYMatchOptions()
+        (o.channelIndex, o.channelName) = parseChannel(xyChannel)
+        o.region = try parseRegion(xyRegion, box: xyBox, prefix: "xy", default: .wholeFrame)
+        o.holdInPlace = !xyNoHold
+        if let v = xySmoothing {
+            guard v.isFinite, v >= 0 else { throw ValidationError("--xy-smoothing must be 0 or a positive number of timepoints") }
+            o.smoothing = v
         }
+        if let v = xyMaxAngle {
+            guard v.isFinite, v >= 0 else { throw ValidationError("--xy-max-angle must be 0 or a positive number of degrees") }
+            o.maximumAngle = v
+        }
+        if xyNoRotation { o.maximumAngle = 0 }
+        return o
     }
 }
 
@@ -198,25 +189,19 @@ struct Convert: ParsableCommand {
 }
 
 struct Align: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Align embryo movies in xy from a threshold YAML, by the mask centroid or by image matching, and optionally correct z drift.")
+    static let configuration = CommandConfiguration(abstract: "Align an embryo movie in xy by image matching, and optionally correct z drift.")
 
-    @Argument(help: "Threshold YAML from the Mask tool.")
-    var yamlFile: String
+    @Argument(help: "An OME-TIFF or ND2 movie.")
+    var movie: String
 
-    @Flag(name: [.customLong("use-nd2"), .customLong("use_nd2")], help: "Load from the ND2 file instead of the per-embryo TIF.")
-    var useND2 = false
+    @Option(help: "Threshold YAML from the Mask tool. It is needed to hold the body in place and to follow the embryo mask.")
+    var yaml: String?
 
     @Option(help: "Frames per second of the movies (default: 2).")
     var fps: Double = 2
 
     @Flag(name: [.customLong("no-enlarge-canvas"), .customLong("no_enlarge_canvas")], help: "Keep the original canvas (edge data may be clipped).")
     var noEnlargeCanvas = false
-
-    @Flag(name: [.customLong("use-gpu"), .customLong("use_gpu")], help: "Whole-pixel shifts, as the Python --use_gpu path produced. (The GPU is always used.)")
-    var useGPU = false
-
-    @Option(name: .customLong("shift-mode"), help: "subpixel (scipy bilinear, default) or integer (whole pixels).")
-    var shiftMode: String?
 
     @Flag(name: [.customLong("low-memory"), .customLong("low_memory")], help: "Do not keep frames in memory between the two passes.")
     var lowMemory = false
@@ -235,21 +220,14 @@ struct Align: ParsableCommand {
     @OptionGroup var backend: BackendOption
 
     func run() throws {
-        var o = AlignOptions(yaml: URL(fileURLWithPath: yamlFile))
+        var o = AlignOptions(source: URL(fileURLWithPath: movie), yaml: yaml.map { URL(fileURLWithPath: $0) })
         o.xyMatching = try xy.make()
         if zCorrect { o.zCorrection = try z.make() }
-        o.useND2 = useND2
         o.fps = fps
         o.enlargeCanvas = !noEnlargeCanvas
         o.lowMemory = lowMemory
-        if let m = shiftMode {
-            guard let mode = ShiftMode(rawValue: m) else { throw ValidationError("shift-mode must be subpixel or integer") }
-            o.shiftMode = mode
-        } else if useGPU {
-            o.shiftMode = .integer
-        }
         let start = Date()
-        _ = try AlignPipeline(options: o, backend: backend.make(), movies: noMovies ? nil : (HEVCMovieFactory() as MovieWriterFactory),
+        _ = try AlignPipeline(options: o, backend: backend.make(), movies: noMovies ? nil : (MovieFileFactory() as MovieWriterFactory),
                               context: consoleContext()).run()
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
     }
@@ -291,35 +269,52 @@ struct CorrectZ: ParsableCommand {
     }
 }
 
-struct ZShifts: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "z-shifts",
-        abstract: "Measure the z drift of an OME-TIFF or ND2 file and save it as CSV, without writing a corrected stack.")
+struct Export: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Write MP4 movies of an OME-TIFF or ND2 file, one for each channel, next to the file.")
 
     @Argument(help: "An OME-TIFF or ND2 file.")
-    var file: String
+    var movie: String
 
-    @Option(help: "Threshold YAML from the Mask tool. It is needed only with --z-region mask.")
-    var yaml: String?
+    @Option(help: "The channel to export, given as a name or as an index that starts at 0. Without it every channel is exported.")
+    var channel: String?
 
-    @Option(help: "Embryo position (ND2 only).")
-    var position = 0
+    @Option(help: "Show this slice, counted from 1. Without it the movie shows the maximum projection along z.")
+    var slice: Int?
 
-    @Option(help: "Where to save the table (default: next to the file, {name}_z_shifts.csv).")
-    var csv: String?
+    @Option(help: "Frames per second (default: 2).")
+    var fps: Double = 2
 
-    @OptionGroup var z: ZOptionGroup
+    @Option(help: "movie sets the brightness once for the whole movie (default). frame sets it for each frame.")
+    var contrast = "movie"
+
+    @Option(help: "A second OME-TIFF or ND2 file, shown to the right of the first one.")
+    var compare: String?
+
+    @Option(help: "hevc (default) or h264. H.264 plays in more programs, and its files are larger.")
+    var codec = "hevc"
+
+    @Option(help: "The quality from 1 to 100 (default: 65). Higher values give larger files with fewer artefacts.")
+    var quality: Double = 65
+
     @OptionGroup var backend: BackendOption
 
     func run() throws {
-        let url = URL(fileURLWithPath: file)
-        let source: FrameSource = url.pathExtension.lowercased() == "nd2" ? try ND2Source(url: url) : try TIFFSource(url: url)
-        let options = try z.make()
-        let cfg = try yaml.map { try ThresholdConfig.load(URL(fileURLWithPath: $0)) }
-        let out = csv.map { URL(fileURLWithPath: $0) }
-            ?? url.deletingLastPathComponent().appendingPathComponent("\(PyFormat.stemWithoutOME(url))_z_shifts.csv")
+        var o = ExportOptions(source: URL(fileURLWithPath: movie))
+        (o.channelIndex, o.channelName) = parseChannel(channel)
+        o.slice = slice
+        o.fps = fps
+        switch contrast.lowercased() {
+        case "movie": o.wholeMovieContrast = true
+        case "frame": o.wholeMovieContrast = false
+        default: throw ValidationError("--contrast must be movie or frame")
+        }
+        o.compare = compare.map { URL(fileURLWithPath: $0) }
+        guard let c = MovieCodec(rawValue: codec.lowercased()) else { throw ValidationError("--codec must be hevc or h264") }
+        guard quality.isFinite && quality >= 1 && quality <= 100 else { throw ValidationError("--quality must be between 1 and 100") }
         let start = Date()
-        _ = try ZMeasure.run(source: source, position: position, options: options, thresholds: cfg, backend: backend.make(),
-                             csv: out, context: consoleContext())
+        _ = try ExportPipeline.run(options: o, backend: backend.make(), movies: MovieFileFactory(codec: c, quality: quality),
+                                   context: consoleContext())
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
     }
 }
@@ -362,7 +357,7 @@ struct ND2Info: ParsableCommand {
 }
 
 struct Bench: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Time the Gaussian, the shift, and the shift with rotation on CPU and Metal.")
+    static let configuration = CommandConfiguration(abstract: "Time the Gaussian and the shift with rotation on CPU and Metal.")
     @Option var size = 1024
     @Option var sigma = 30.0
     @Option var planes = 82
@@ -387,15 +382,12 @@ struct Bench: ParsableCommand {
         for backend in [CPUBackend() as ComputeBackend, MetalBackend.best()] {
             var g = img
             let tg = try median(7) { g = try backend.gaussian(img, sigma: sigma) }
-            let ts = try median(7) {
-                _ = try backend.shift(frame, pad: Padding(top: 10, bottom: 10, left: 10, right: 10), dy: 3.37, dx: -2.61, mode: .subpixel)
-            }
             let move = Rigid.shift(dx: -2.61, dy: 3.37).after(Rigid.rotation(degrees: 4, aboutX: Double(size) / 2, y: Double(size) / 2))
             let tw = try median(7) {
                 _ = try backend.warp(frame, pad: Padding(top: 10, bottom: 10, left: 10, right: 10), transform: move)
             }
-            print(String(format: "%@: gaussian %dx%d sigma %.0f: %.1f ms | shift %d planes: %.1f ms | shift with rotation: %.1f ms | checksum %.3f",
-                         backend.name, size, size, sigma, tg * 1000, planes, ts * 1000, tw * 1000, g.pixels[n / 2]))
+            print(String(format: "%@: gaussian %dx%d sigma %.0f: %.1f ms | shift with rotation of %d planes: %.1f ms | checksum %.3f",
+                         backend.name, size, size, sigma, tg * 1000, planes, tw * 1000, g.pixels[n / 2]))
         }
     }
 }

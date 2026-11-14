@@ -28,16 +28,14 @@ NUCLEAR_NAMES = ("mcherry", "h2b", "nuc", "dapi", "hoechst")
 HELP = {
     "channel": "The matching follows the pattern of this channel. A nuclear marker works best because its pattern stays the same between timepoints.",
     "mask": "These settings need the embryo mask. Make mask opens the threshold window on this movie and starts from a threshold estimated from the image. Saving there writes a YAML file next to the movie, and this field then points to it. An existing threshold YAML file can also be selected.",
-    "method": "Image matching compares each timepoint with the one before it and finds the shift and the turn at which the two images differ least. Mask centroid moves the centroid of the embryo mask to the centre of the frame and does not turn the image.",
     "xy_follow": "The pixels that the matching compares. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside the box, which is given as x, y, width, height in pixels of the first timepoint.",
     "hold": "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the centroid of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints.",
     "smoothing": "The centroid of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back.",
     "rotation": "Image matching also tries small turns between neighbouring timepoints and removes the sudden ones. With this off the matching only shifts, and the image is never turned.",
     "angle": "The matching tries turns up to this angle between two neighbouring timepoints.",
-    "shift": "Sub-pixel moves by the measured amount and interpolates the intensities. Whole pixels rounds the shift and keeps the original intensities.",
     "z_follow": "The pixels whose pattern must stay in the same slice. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside the box, which is given as x, y, width, height in pixels of the first timepoint.",
     "span": "Each timepoint is compared with the one before it and with the one this many timepoints earlier. A slow movement is too small to measure between neighbours and adds up to a measurable amount over several timepoints. With 1 only neighbours are compared.",
-    "drop": "Timepoints whose z movement from the previous timepoint exceeds this number of slices are left out of the output. Later timepoints are still corrected for that movement.",
+    "drop": "Timepoints whose z movement from the last kept timepoint exceeds this number of slices are left out of the output. The other timepoints are aligned as if the dropped ones were never recorded. When the tissue stays at the new depth, only the first timepoint after the move is dropped.",
     "enlarge": "Adds empty pixels around the frame and empty slices to the stack so that data moved by the correction stays in the file. Without it the file keeps its size and data that moves outside is lost.",
     "fps": "The playback speed of the MP4 movies written next to the corrected file.",
     "low_memory": "Reads the movie from disk again when writing the output. Without it the frames are kept in memory between the two passes, which is faster and needs enough memory for the whole movie.",
@@ -163,7 +161,7 @@ class AlignWindow(QMainWindow):
         self._update_visible()
 
     def _advanced_row(self, group, label, widget, text):
-        """Add a setting to the advanced options. `group` says which tab and method show it. `text` is the
+        """Add a setting to the advanced options. `group` says which tab and setting show it. `text` is the
         explanation that appears when the pointer rests on the setting or on its label."""
         name = QLabel(label)
         for item in (name, widget):
@@ -181,18 +179,13 @@ class AlignWindow(QMainWindow):
             heading.setStyleSheet("font-weight: bold;")
 
         self.form.addRow(self.xy_heading)
-        self.method_combo = QComboBox()
-        self.method_combo.addItem("Image matching", "image")
-        self.method_combo.addItem("Mask centroid", "centroid")
-        self.method_combo.currentIndexChanged.connect(self._update_visible)
-        self._advanced_row("xy", "Method:", self.method_combo, HELP["method"])
         self.xy_follow = FollowSettings()
         self.xy_follow.region_combo.currentIndexChanged.connect(self._update_visible)
-        self._advanced_row("image", "Follow:", self.xy_follow, HELP["xy_follow"])
+        self._advanced_row("xy", "Follow:", self.xy_follow, HELP["xy_follow"])
         self.hold_check = QCheckBox("Hold the body in place with the embryo mask")
         self.hold_check.setChecked(True)
         self.hold_check.toggled.connect(self._update_visible)
-        self._advanced_row("image", "", self.hold_check, HELP["hold"])
+        self._advanced_row("xy", "", self.hold_check, HELP["hold"])
         self.smoothing_spin = QDoubleSpinBox()
         self.smoothing_spin.setRange(0, 1000)
         self.smoothing_spin.setDecimals(1)
@@ -201,16 +194,12 @@ class AlignWindow(QMainWindow):
         self.rotation_check = QCheckBox("Correct rotation")
         self.rotation_check.setChecked(True)
         self.rotation_check.toggled.connect(self._update_visible)
-        self._advanced_row("image", "", self.rotation_check, HELP["rotation"])
+        self._advanced_row("xy", "", self.rotation_check, HELP["rotation"])
         self.angle_spin = QDoubleSpinBox()
         self.angle_spin.setRange(0.1, 45)
         self.angle_spin.setDecimals(1)
         self.angle_spin.setValue(3)
         self._advanced_row("rotation", "Largest turn (degrees):", self.angle_spin, HELP["angle"])
-        self.shift_combo = QComboBox()
-        self.shift_combo.addItem("Sub-pixel (bilinear interpolation)", "subpixel")
-        self.shift_combo.addItem("Whole pixels (no interpolation)", "integer")
-        self._advanced_row("centroid", "Shift:", self.shift_combo, HELP["shift"])
 
         self.form.addRow(self.z_heading)
         self.z_follow = FollowSettings()
@@ -261,23 +250,19 @@ class AlignWindow(QMainWindow):
     def does_z(self):
         return self.mode() != "xy"
 
-    def image_method(self):
-        return self.does_xy() and self.method_combo.currentData() == "image"
-
     def needs_mask(self):
-        """The embryo mask is needed for the centroid method, for holding the body, and for following the mask."""
-        xy = self.does_xy() and (not self.image_method() or self.hold_check.isChecked() or self.xy_follow.region() == "mask")
+        """The embryo mask is needed for holding the body and for following the mask."""
+        xy = self.does_xy() and (self.hold_check.isChecked() or self.xy_follow.region() == "mask")
         return xy or (self.does_z() and self.z_follow.region() == "mask")
 
     def _update_visible(self, *_):
-        """Show the settings that the chosen tab and method use."""
+        """Show the settings that the chosen tab uses."""
         show = self.advanced_button.isChecked()
         self.advanced_button.setText(("▾ " if show else "▸ ") + "Advanced options")
-        image = self.image_method()
+        xy = self.does_xy()
         visible = {
-            "xy": self.does_xy(), "image": image, "hold": image and self.hold_check.isChecked(),
-            "rotation": image and self.rotation_check.isChecked(),
-            "centroid": self.does_xy() and not image, "z": self.does_z(), "output": True,
+            "xy": xy, "hold": xy and self.hold_check.isChecked(), "rotation": xy and self.rotation_check.isChecked(),
+            "z": self.does_z(), "output": True,
         }
         for group, *widgets in self.advanced:
             for widget in widgets:
@@ -364,28 +349,25 @@ class AlignWindow(QMainWindow):
         if not movie.is_file():
             QMessageBox.warning(self, "Invalid movie", "Select an existing OME-TIFF or ND2 file.")
             return
-        args = ["--input", str(movie.resolve())]
+        args = [str(movie.resolve())]
         if self.needs_mask():
             yaml_path = Path(self.yaml_edit.text().strip()).expanduser()
             if not yaml_path.is_file():
                 QMessageBox.warning(self, "No mask", "These settings need an embryo mask. Make one with Make mask, or "
                                                      "select a threshold YAML file.")
                 return
-            args.insert(0, str(yaml_path.resolve()))
+            args += ["--yaml", str(yaml_path.resolve())]
         channel = self.channel_combo.currentText().strip()
         try:
             if not self.does_xy():
                 args += ["--xy_method", "none"]
-            elif self.image_method():
-                args += ["--xy_method", "image", *self.xy_follow.arguments("xy"),
-                         "--xy_smoothing", str(self.smoothing_spin.value()),
+            else:
+                args += [*self.xy_follow.arguments("xy"), "--xy_smoothing", str(self.smoothing_spin.value()),
                          "--xy_max_angle", str(self.angle_spin.value() if self.rotation_check.isChecked() else 0)]
                 if channel:
                     args += ["--xy_channel", channel]
                 if not self.hold_check.isChecked():
                     args.append("--xy_no_hold")
-            else:
-                args += ["--xy_method", "centroid", "--shift_mode", self.shift_combo.currentData()]
             if self.does_z():
                 args += ["--z_correct", *self.z_follow.arguments("z"), "--z_span", str(self.span_spin.value())]
                 if channel:

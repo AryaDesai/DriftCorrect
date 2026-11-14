@@ -16,11 +16,6 @@ public protocol ComputeBackend: AnyObject {
     /// Return the maximum over Z of every channel.
     func maxProjectAll(_ frame: Volume) throws -> [Image2D]
 
-    /// Shift every plane onto the canvas of the frame plus `pad` and convert the result to uint16. The shift is
-    /// `scipy.ndimage.shift(order=1, mode="constant")` or a shift by whole pixels, followed by
-    /// `clip(0, 65535).astype(np.uint16)`.
-    func shift(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) throws -> Volume
-
     /// Move every plane by a rotation and a shift onto the canvas of the frame plus `pad`, as `Shift.warp` does.
     func warp(_ frame: Volume, pad: Padding, transform: Rigid) throws -> Volume
 }
@@ -53,10 +48,6 @@ public final class CPUBackend: ComputeBackend {
         }
         return out.map { $0! }
     }
-
-    public func shift(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) throws -> Volume {
-        Shift.apply(frame, pad: pad, dy: dy, dx: dx, mode: mode)
-    }
 }
 
 /// The detection of the xy centroid, which the Mask tool and the alignment share.
@@ -84,7 +75,7 @@ public enum Detection {
     }
 }
 
-/// The output of a grayscale movie. `DCApple.HEVCMovieWriter` implements it with VideoToolbox.
+/// The output of a grayscale movie. `DCApple.MovieFileWriter` implements it with VideoToolbox.
 public protocol MovieWriter: AnyObject {
     /// Append one uint8 gray frame of `width * height` pixels, stored row by row.
     func append(gray: [UInt8]) throws

@@ -228,33 +228,25 @@ def _round(value):
     return int(math.copysign(math.floor(abs(value) + 0.5), value))
 
 
-def plan(steps, position=None, reference=0, dead_band=0.15, pad=True, maximum_step=None):
+def plan(steps, position=None, dead_band=0.15, pad=True):
     """Turn the movements between timepoints into a shift of whole slices for every timepoint. `position` is the
-    position of the tissue at every timepoint, and without it the movements are added up. `reference` is the
-    timepoint whose slices stay where they are. The shift changes only when the position is `dead_band` beyond the
+    position of the tissue at every timepoint, and without it the movements are added up. The slices of the first
+    timepoint stay where they are. The shift changes only when the position is `dead_band` beyond the
     midpoint between two slices, because a position that stays close to a midpoint would otherwise make the output
     switch between two slices. With `pad`, empty slices are added so that no slice is lost."""
-    if maximum_step is not None and (not math.isfinite(maximum_step) or maximum_step <= 0):
-        raise ValueError("Maximum shift must be a positive number of slices")
     if position is None or len(position) != len(steps):
         position = np.cumsum([0.0] + [s.dz for s in steps[1:]]) if len(steps) else np.array([])
     position = np.array(position, dtype=float)
     whole = np.zeros(len(position), dtype=int)
     if len(position):
-        ref = min(max(0, reference), len(position) - 1)
-        position -= position[ref]
-        # Follow the position in whole slices, forward and then backward from the reference timepoint.
-        for indices in (range(ref + 1, len(position)), range(ref - 1, -1, -1)):
-            previous = ref
-            for t in indices:
-                whole[t] = _round(position[t]) if abs(position[t] - whole[previous]) >= 0.5 + dead_band else whole[previous]
-                previous = t
+        position -= position[0]
+        # Follow the position in whole slices from the first timepoint.
+        for t in range(1, len(position)):
+            whole[t] = _round(position[t]) if abs(position[t] - whole[t - 1]) >= 0.5 + dead_band else whole[t - 1]
     # The correction moves each timepoint opposite to the movement of the tissue.
     shifts = -whole
-    kept = np.array([t for t, step in enumerate(steps) if t == 0 or maximum_step is None or abs(step.dz) <= maximum_step], dtype=int)
-    selected = shifts[kept]
-    return Plan(position, shifts, max(0, -int(selected.min())) if pad and len(selected) else 0,
-                max(0, int(selected.max())) if pad and len(selected) else 0, kept)
+    return Plan(position, shifts, max(0, -int(shifts.min())) if pad and len(shifts) else 0,
+                max(0, int(shifts.max())) if pad and len(shifts) else 0, np.arange(len(shifts)))
 
 
 def place(frame, shift, pad_low, pad_high):
@@ -280,22 +272,48 @@ class Tracker:
     """Follows one embryo through time. The descriptor of each timepoint is added in the order of time."""
 
     def __init__(self, span=5, dead_band=0.15, maximum_step=None):
+        if maximum_step is not None and (not math.isfinite(maximum_step) or maximum_step <= 0):
+            raise ValueError("Maximum shift must be a positive number of slices")
         self.span, self.dead_band, self.maximum_step = span, dead_band, maximum_step
-        self.recent = []        # the last few timepoints, each with the xy step that moves it onto the one before
+        # This holds the last few kept timepoints. Each has the xy step that moves it onto the kept timepoint before
+        # it, and whether its match was good.
+        self.recent = []
+        # When the timepoint before this one was dropped, this holds it with the xy step that moves it onto the last
+        # kept timepoint. It shows whether a large move stayed.
+        self.dropped = None
+        # This holds the measurement of every timepoint, kept or dropped, for the log and the table.
         self.steps = []
+        # These timepoints are written. The others moved further than `maximum_step` and are dropped.
+        self.kept = []
+        # Each edge compares two kept timepoints. Its indices count the kept timepoints only, because the positions
+        # are solved for the kept timepoints alone.
         self.edges = []
 
     def add(self, describe_moved, step=None):
-        """Compare the timepoint with the previous one and store the result. `describe_moved(transform)` returns
+        """Compare the timepoint with the last kept one and store the result. `describe_moved(transform)` returns
         the descriptor of this timepoint after it is moved in xy by `transform`. `step` is the xy transform that
-        moves this timepoint onto the previous one. The timepoint is also compared with the one `span` timepoints
-        earlier, where a slow movement is large enough to measure."""
+        moves this timepoint onto the last kept one. The timepoint is also compared with the kept one `span` places
+        earlier, where a slow movement is large enough to measure. A dropped timepoint takes no part in later
+        comparisons, so the timepoints after it are measured as if it was never recorded."""
         step = np.eye(3) if step is None else step
         t = len(self.steps)
         s = match(self.recent[-1][0], describe_moved(step)) if self.recent else Step()
         self.steps.append(s)
-        if t > 0:
-            self.edges.append((t - 1, t, s.dz))
+        if self.maximum_step is not None and t > 0 and abs(s.dz) > self.maximum_step:
+            # The timepoint is far from the last kept one. It is dropped unless the timepoint before it was dropped
+            # at the same place, which means that the tissue moved there and stayed.
+            stayed = False
+            if self.dropped is not None:
+                onto_dropped = np.linalg.inv(self.dropped[1]) @ step
+                stayed = abs(match(self.dropped[0], describe_moved(onto_dropped)).dz) <= self.maximum_step
+            if not stayed:
+                self.dropped = (describe_moved(np.eye(3)), step)
+                return s
+        self.dropped = None
+        n = len(self.kept)
+        self.kept.append(t)
+        if n > 0:
+            self.edges.append((n - 1, n, s.dz))
         if self.span > 1 and len(self.recent) >= self.span:
             # Join the xy steps of the timepoints in between, so that this timepoint lands on the earlier one.
             joined = step
@@ -303,18 +321,28 @@ class Tracker:
                 joined = self.recent[k][1] @ joined
             far = match(self.recent[-self.span][0], describe_moved(joined))
             # Use the comparison only when it and every step it spans matched well.
-            if not far.flag and all(not x.flag for x in self.steps[t - self.span + 1:t + 1]):
-                self.edges.append((t - self.span, t, far.dz))
+            if not far.flag and not s.flag and all(good for _, _, good in self.recent[len(self.recent) - self.span + 1:]):
+                self.edges.append((n - self.span, n, far.dz))
         # Keep this timepoint in its own frame, where later timepoints are moved onto it.
-        self.recent.append((describe_moved(np.eye(3)), step))
+        self.recent.append((describe_moved(np.eye(3)), step, not s.flag))
         if len(self.recent) > max(1, self.span):
             self.recent.pop(0)
         return s
 
     def plan(self, pad=True):
-        """Return the shift of every timepoint in whole slices."""
-        return plan(self.steps, position=positions(len(self.steps), self.edges), dead_band=self.dead_band, pad=pad,
-                    maximum_step=self.maximum_step)
+        """Return the shift of every timepoint in whole slices. The shifts are worked out from the kept
+        timepoints."""
+        part = plan([self.steps[t] for t in self.kept], position=positions(len(self.kept), self.edges),
+                    dead_band=self.dead_band, pad=pad)
+        # A dropped timepoint is listed in the table with its position measured from the last kept timepoint.
+        position, shift = np.zeros(len(self.steps)), np.zeros(len(self.steps), dtype=int)
+        k = -1
+        for t, s in enumerate(self.steps):
+            is_kept = k + 1 < len(self.kept) and self.kept[k + 1] == t
+            k += is_kept
+            position[t] = part.position[k] + (0 if is_kept else s.dz)
+            shift[t] = part.shift[k]
+        return Plan(position, shift, part.pad_low, part.pad_high, np.array(self.kept, dtype=int))
 
     def summary(self, correction, z):
         """Build the lines that the log shows after all timepoints are measured."""

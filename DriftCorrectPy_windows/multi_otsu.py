@@ -94,18 +94,3 @@ def multiotsu_thresholds_and_classes(smoothed, levels):
         return multi_otsu(image, classes=levels, nbins=MULTIOTSU_NBINS)
     except ValueError:
         return np.array([], dtype=np.float64), np.zeros(image.shape, dtype=np.int32)
-
-
-def partition_score(histogram, breaks):
-    """Between-class variance of a partition (for tests and diagnostics)."""
-    nb = len(histogram)
-    w = np.asarray(histogram, dtype=np.float64) / np.sum(histogram)
-    c = (np.arange(nb) + 0.5) / nb - 0.5
-    b = [0, *list(breaks), nb]
-    total = 0.0
-    for i in range(len(b) - 1):
-        m = w[b[i]:b[i + 1]].sum()
-        if m > 0:
-            mo = (w[b[i]:b[i + 1]] * c[b[i]:b[i + 1]]).sum()
-            total += mo * mo / m
-    return total

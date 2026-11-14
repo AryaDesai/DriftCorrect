@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 enum Services {
     /// The Metal backend on Apple silicon, or the CPU reference when Metal is not available.
     static let backend: ComputeBackend = MetalBackend.best()
-    static let movies: MovieWriterFactory = HEVCMovieFactory()
+    static let movies: MovieWriterFactory = MovieFileFactory()
 }
 
 /// Lines and progress sent from worker threads, collected for the main thread.

@@ -1,37 +1,22 @@
 import Foundation
 
-/// The "Align movie" tool, ported from `centroid_align_xy.py`.
-///
-/// It differs from the Python script in these ways.
-/// - Every YAML setting is used, which covers the method, invert, levels, selected classes, block size and
-///   the parameters of each timepoint. The Python worker used only sigma, percentile and channel_index, so
-///   its result could differ from the preview of the Mask tool.
-/// - `--use_nd2` writes the unaligned movies from the ND2 frames. The Python
-///   script stopped with a NameError at that step.
-/// - Movies are encoded while the frames pass through. The Python script read the TIFFs again afterwards.
-///   The frames and the contrast rule are the same.
-/// - The unaligned movie name is always `{stem}_{channel}_unaligned.mp4`. The Python script used a different
-///   name when it enlarged the canvas.
-/// - With `xyMatching` set, the xy shift comes from image matching between neighbouring timepoints, as `XYMatch`
-///   describes, in place of the centroid of the embryo mask.
-/// - With `zCorrection` set, z correction runs after the xy alignment, as `ZDrift` describes. The output is then
-///   `{stem}_xy_z.ome.tif` and `{stem}_xy_z_shifts.csv`.
+/// The Align tool. Pass 1 finds the xy movement of every timepoint by image matching, as `XYMatch` describes, and
+/// can hold the body in place with the embryo mask, as `Anchor` describes. With `zCorrection` set, it also measures
+/// the z drift, as `ZDrift` describes. Pass 2 moves every timepoint and writes the output, which is
+/// `{stem}_xy.ome.tif`, or `{stem}_xy_z.ome.tif` and `{stem}_xy_z_shifts.csv` with z correction. Movies are encoded
+/// while the frames pass through.
 public struct AlignOptions {
-    /// The threshold YAML file from the Mask tool. It is needed when the run uses the embryo mask, and it names the
-    /// movie when `source` is nil.
+    /// The OME-TIFF or ND2 movie to align.
+    public var source: URL
+    /// The threshold YAML file from the Mask tool. It is needed when the run uses the embryo mask.
     public var yaml: URL?
-    /// The OME-TIFF or ND2 movie to align. When nil, the movie that the YAML file names is used.
-    public var source: URL?
-    public var useND2 = false
     public var fps: Double = 2
     public var enlargeCanvas = true
-    public var shiftMode: ShiftMode = .subpixel
     public var lowMemory = false
-    /// Settings of the xy alignment by image matching. When nil, the centroid of the embryo mask is centred.
-    public var xyMatching: XYMatchOptions?
+    /// Settings of the xy alignment by image matching.
+    public var xyMatching = XYMatchOptions()
     /// Settings of the z correction. When nil, only the xy alignment runs.
     public var zCorrection: ZCorrectionOptions?
-    public init(yaml: URL) { self.yaml = yaml }
     public init(source: URL, yaml: URL? = nil) { self.source = source; self.yaml = yaml }
 }
 
@@ -39,10 +24,9 @@ public struct AlignResult {
     public var outputDirectory: URL
     public var tiffs: [URL] = []
     public var movies: [URL] = []
-    /// The shift (dy, dx) of timepoint `t` of embryo `p` is `shifts[p][t]`.
+    /// `transforms[p][i]` places a written timepoint of embryo `p` in the output, before the canvas padding. `i`
+    /// counts the timepoints that are written. `shifts[p][i]` holds how far the same transform moves the frame centre.
     public var shifts: [[(dy: Double, dx: Double)]] = []
-    /// With image matching, the transform that places timepoint `t` of embryo `p` in the output is
-    /// `transforms[p][t]`, before the canvas padding. `shifts` then holds how far each one moves the frame centre.
     public var transforms: [[Rigid]] = []
     /// The z correction of each embryo. `zSteps` holds what was measured at every timepoint and `zPlans` holds
     /// the shifts in whole slices.
@@ -72,62 +56,18 @@ public final class AlignPipeline {
         var stem: String
     }
 
-    /// Resolve the input file with the same rules as the Python script.
-    public static func resolveTIF(yaml: URL, sourceFile: String) throws -> (url: URL, base: String) {
-        let src = URL(fileURLWithPath: sourceFile)
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: src.path, isDirectory: &isDir), !isDir.boolValue,
-           [".tif", ".tiff"].contains("." + src.pathExtension.lowercased()) {
-            return (src, PyFormat.stemWithoutOME(src))
-        }
-        let stem = PyFormat.stem(yaml)
-        let parts = stem.components(separatedBy: "_P")
-        guard parts.count > 1 else {
-            throw DCError("Could not derive embryo ID from \(yaml.lastPathComponent) and source file not found.")
-        }
-        let pID = "P" + (parts[1].components(separatedBy: "_").first ?? "")
-        let candidates = globFiles(yaml.deletingLastPathComponent(), pattern: "\(pID)*.ome.tif")
-        guard let first = candidates.first else {
-            throw DCError("no TIF found for \(pID) in \(yaml.deletingLastPathComponent().path)")
-        }
-        return (first, pID)
-    }
-
-    func openInput(_ cfg: ThresholdConfig?) throws -> Input {
-        if let file = options.source {
-            // The movie is given directly. An ND2 file can hold several embryos, and a TIFF file holds one.
-            guard FileManager.default.fileExists(atPath: file.path) else { throw DCError("File not found: \(file.path)") }
-            ctx.log("Loading \(file.lastPathComponent) ...")
-            let isND2 = file.pathExtension.lowercased() == "nd2"
-            let src: FrameSource = isND2 ? try ND2Source(url: file) : try TIFFSource(url: file)
-            let base = isND2 ? PyFormat.stem(file) : PyFormat.stemWithoutOME(file)
-            ctx.log("  Shape: T=\(src.t), P=\(src.positions), Z=\(src.z), C=\(src.c), Y=\(src.y), X=\(src.x)")
-            return Input(source: src, base: base,
-                         outDir: file.deletingLastPathComponent().appendingPathComponent("aligned_\(base)"),
-                         isND2: isND2, stem: base)
-        }
-        guard let cfg = cfg, let yaml = options.yaml else { throw DCError("Give a movie or a threshold YAML file.") }
-        if options.useND2 {
-            let nd2 = URL(fileURLWithPath: cfg.sourceFile)
-            guard FileManager.default.fileExists(atPath: nd2.path) else {
-                throw DCError("ND2 file not found: \(nd2.path)")
-            }
-            ctx.log("Loading \(nd2.path) ...")
-            let src = try ND2Source(url: nd2)
-            let base = PyFormat.stem(nd2)
-            ctx.log("  Shape: T=\(src.t), P=\(src.positions), Z=\(src.z), C=\(src.c), Y=\(src.y), X=\(src.x)")
-            return Input(source: src, base: base,
-                         outDir: nd2.deletingLastPathComponent().appendingPathComponent("aligned_\(base)"),
-                         isND2: true, stem: base)
-        }
-        let (tif, base) = try AlignPipeline.resolveTIF(yaml: yaml, sourceFile: cfg.sourceFile)
-        if tif.path == URL(fileURLWithPath: cfg.sourceFile).path { ctx.log("Using source file from YAML: \(tif.path)") }
-        ctx.log("Loading \(tif.lastPathComponent) ...")
-        let src = try TIFFSource(url: tif)
-        ctx.log("  Shape: T=\(src.t), C=\(src.c), Z=\(src.z), Y=\(src.y), X=\(src.x)")
+    func openInput() throws -> Input {
+        // An ND2 file can hold several embryos, and a TIFF file holds one.
+        let file = options.source
+        guard FileManager.default.fileExists(atPath: file.path) else { throw DCError("File not found: \(file.path)") }
+        ctx.log("Loading \(file.lastPathComponent) ...")
+        let isND2 = file.pathExtension.lowercased() == "nd2"
+        let src: FrameSource = isND2 ? try ND2Source(url: file) : try TIFFSource(url: file)
+        let base = isND2 ? PyFormat.stem(file) : PyFormat.stemWithoutOME(file)
+        ctx.log("  Shape: T=\(src.t), P=\(src.positions), Z=\(src.z), C=\(src.c), Y=\(src.y), X=\(src.x)")
         return Input(source: src, base: base,
-                     outDir: tif.deletingLastPathComponent().appendingPathComponent("aligned_\(base)"),
-                     isND2: false, stem: PyFormat.stemWithoutOME(tif))
+                     outDir: file.deletingLastPathComponent().appendingPathComponent("aligned_\(base)"),
+                     isND2: isND2, stem: base)
     }
 
     /// The suffix that output names get when z correction is on. It keeps the output apart from the output of a
@@ -152,7 +92,7 @@ public final class AlignPipeline {
 
     public func run() throws -> AlignResult {
         let cfg = try options.yaml.map { try ThresholdConfig.load($0) }
-        let input = try openInput(cfg)
+        let input = try openInput()
         let src = input.source
         let names = src.metadata.channelNames
         guard names.count >= src.c else { throw DCError("The file has \(src.c) channels but only \(names.count) names") }
@@ -183,7 +123,7 @@ public final class AlignPipeline {
         let width = pipelineWidth(frameBytes: src.frameBytes)
         let cache = FrameCache(enabled: !options.lowMemory && FrameCache.fits(bytes: src.frameBytes * T * P))
         var trackers: [ZTracker] = []
-        let zopt = options.zCorrection, xyopt = options.xyMatching
+        let zopt = options.zCorrection, xy = options.xyMatching
         if let limit = zopt?.maximumStep, !limit.isFinite || limit <= 0 {
             throw DCError("Maximum shift must be a positive number of slices")
         }
@@ -191,41 +131,33 @@ public final class AlignPipeline {
         func name(_ c: Int) -> String { c < names.count ? names[c] : "ch\(c)" }
         let thresholdChannel = cfg?.parameters.channelIndex ?? 0
         let zChannel = try zopt?.resolveChannel(names: names, count: src.c, fallback: thresholdChannel) ?? 0
-        let xyChannel = try xyopt.map {
-            try resolveChannel(index: $0.channelIndex, name: $0.channelName, names: names, count: src.c,
-                               fallback: thresholdChannel, label: "XY")
-        } ?? 0
-        // The embryo mask is needed for the centroid, and for image matching or z correction that follow the mask.
-        let needsMask = xyopt == nil || xyopt!.holdInPlace || xyopt?.region == .embryoMask || zopt?.region == .embryoMask
+        let xyChannel = try resolveChannel(index: xy.channelIndex, name: xy.channelName, names: names, count: src.c,
+                                           fallback: thresholdChannel, label: "XY")
+        // The embryo mask is needed to hold the body in place, and for image matching or z correction that follow it.
+        let needsMask = xy.holdInPlace || xy.region == .embryoMask || zopt?.region == .embryoMask
         guard !needsMask || cfg != nil else {
             throw DCError("These settings need an embryo mask, and no threshold YAML file was given.")
         }
-        if let xy = xyopt {
-            ctx.log("  XY: image matching of \(name(xyChannel)) (index \(xyChannel)), following \(describe(xy.region))")
-            ctx.log(xy.holdInPlace ? "      The centroid of the embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
-                                   : "      The body is not held in place.")
-        } else {
-            ctx.log("  XY: centroid of the embryo mask")
-        }
+        ctx.log("  XY: image matching of \(name(xyChannel)) (index \(xyChannel)), following \(describe(xy.region))")
+        ctx.log(xy.holdInPlace ? "      The centroid of the embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
+                               : "      The body is not held in place.")
         let midX = Double(src.x - 1) / 2, midY = Double(src.y - 1) / 2
         if let z = zopt { ctx.log("  Z correction: \(name(zChannel)) (index \(zChannel)), following \(describe(z.region))") }
 
         ctx.log("\n--- Pass 1: precomputing shifts ---")
-        var shifts = [[(dy: Double, dx: Double)]](repeating: [], count: P)
-        // With image matching, the step that moves each timepoint onto the one before it, and the pose of the body.
+        // The step that moves each kept timepoint onto the kept one before it, and the pose of the body.
         var steps = [[Rigid]](repeating: [], count: P), poses = [[BodyPose?]](repeating: [], count: P)
         struct Item {
             var frame: Volume
             var detection: Detection.Result?
             var gray: [[UInt8]]
-            var xy: XYFrame?
+            var xy: XYFrame
         }
         for p in 0..<P {
             ctx.log("\n  Embryo \(p)/\(P - 1):")
             let tracker = zopt.map { ZTracker(options: $0) }
             // The previous timepoint for image matching, with its mask.
             var previous: (frame: XYFrame, mask: Mask2D?)?
-            var position = (dy: 0.0, dx: 0.0)
             // The transform that moves the current timepoint onto the first one, which is the sum of the steps.
             var toFirst = Rigid.identity
             let unaligned = try movies.map {
@@ -238,59 +170,49 @@ public final class AlignPipeline {
                     let detection = needsMask ? try Detection.computeShift(frame: frame, params: try cfg!.params(forTimepoint: t),
                                                                            backend: self.backend) : nil
                     var gray: [[UInt8]] = []
-                    var xy: XYFrame?
+                    let xy: XYFrame
                     if unaligned != nil {
                         let projections = try self.backend.maxProjectAll(frame)
                         gray = ChannelMovies.grayFrames(projections)
-                        if xyopt != nil { xy = XYMatch.prepare(projections[xyChannel]) }
-                    } else if xyopt != nil {
+                        xy = XYMatch.prepare(projections[xyChannel])
+                    } else {
                         xy = XYMatch.prepare(try self.backend.maxProjectZ(frame, channel: xyChannel))
                     }
                     cache.put(p * T + t, frame)
                     return Item(frame: frame, detection: detection, gray: gray, xy: xy)
                 }, consume: { t, item in
-                    // The xy movement of this timepoint. `step` moves it onto the timepoint before it.
-                    var line: String
-                    var step = Rigid.identity
-                    if let current = item.xy, let xy = xyopt {
-                        var cost = 0.0
-                        if let prev = previous {
-                            let region = XYMatch.region(xy.region, mask: prev.mask, toFirst: toFirst,
-                                                        width: current.width, height: current.height)
-                            let m = XYMatch.match(prev.frame, current, region: region, maximumAngle: xy.maximumAngle)
-                            step = m.step; cost = m.cost
-                        }
-                        previous = (current, item.detection?.mask)
-                        steps[p].append(step)
-                        poses[p].append(xy.holdInPlace ? item.detection?.mask.flatMap { Anchor.pose(of: $0) } : nil)
-                        let moved = step.apply(x: midX, y: midY)
-                        line = Masking.shiftLine(moved.y - midY, moved.x - midX) + PyFormat.fmt("  angle=%+6.2f", step.degrees)
-                            + "  mismatch " + (cost.isFinite ? PyFormat.fmt("%.3f", cost) : "--")
-                        if !(cost <= ZDrift.weakCost) { line += "  [weak match]" }
-                    } else {
-                        // The centroid alignment moves each timepoint by whole pixels for the z comparison.
-                        let now = (dy: item.detection!.dy, dx: item.detection!.dx)
-                        if t > 0 {
-                            step = Rigid.shift(dx: Double(Shift.pyRound(now.dx) - Shift.pyRound(position.dx)),
-                                               dy: Double(Shift.pyRound(now.dy) - Shift.pyRound(position.dy)))
-                        }
-                        position = now
-                        shifts[p].append(position)
-                        line = Masking.shiftLine(position.dy, position.dx)
+                    // The xy movement of this timepoint. `step` moves it onto the last kept timepoint.
+                    var step = Rigid.identity, cost = 0.0
+                    if let prev = previous {
+                        let region = XYMatch.region(xy.region, mask: prev.mask, toFirst: toFirst,
+                                                    width: item.xy.width, height: item.xy.height)
+                        let m = XYMatch.match(prev.frame, item.xy, region: region, maximumAngle: xy.maximumAngle)
+                        step = m.step; cost = m.cost
                     }
-                    toFirst = toFirst.after(step)
+                    let moved = step.apply(x: midX, y: midY)
+                    var line = Masking.shiftLine(moved.y - midY, moved.x - midX) + PyFormat.fmt("  angle=%+6.2f", step.degrees)
+                        + "  mismatch " + (cost.isFinite ? PyFormat.fmt("%.3f", cost) : "--")
+                    if !(cost <= ZDrift.weakCost) { line += "  [weak match]" }
+                    let onFirst = toFirst.after(step)
                     // Z correction compares each timepoint with earlier ones after moving it onto them in xy.
+                    var keep = true
                     if let z = zopt, let tr = tracker {
-                        let region = XYMatch.region(z.region, mask: item.detection?.mask, toFirst: toFirst, width: src.x, height: src.y)
+                        let region = XYMatch.region(z.region, mask: item.detection?.mask, toFirst: onFirst, width: src.x, height: src.y)
                         let measured = tr.add(step: step) {
                             ZDrift.describe(frame: item.frame, channel: zChannel, region: region, transform: $0)
                         }
                         line += "   " + ZDrift.line(measured)
+                        keep = tr.kept.last == t
                     }
-                    ctx.log(line)
-                    var keep = true
-                    if let tracker = tracker, let limit = zopt?.maximumStep, t > 0 { keep = abs(tracker.steps[t].dz) <= limit }
-                    if keep { try unaligned?.append(item.gray) }
+                    ctx.log(keep ? line : line + "  [dropped]")
+                    // A dropped timepoint is not stored, so the next timepoint is matched to the last kept one.
+                    if keep {
+                        toFirst = onFirst
+                        previous = (item.xy, item.detection?.mask)
+                        steps[p].append(step)
+                        poses[p].append(xy.holdInPlace ? item.detection?.mask.flatMap { Anchor.pose(of: $0) } : nil)
+                        try unaligned?.append(item.gray)
+                    }
                     ctx.progress("Pass 1: shifts (embryo \(p))", t + 1, T)
                 })
                 try unaligned?.finish()
@@ -301,20 +223,17 @@ public final class AlignPipeline {
             if let u = unaligned { result.movies += u.urls }
             if let tr = tracker { trackers.append(tr) }
         }
-        // With image matching, work out where every timepoint goes in the output.
+        // Work out where every timepoint goes in the output.
         var transforms: [[Rigid]] = []
-        if let xy = xyopt {
-            for p in 0..<P {
-                let held = xy.holdInPlace && !poses[p].contains(where: { $0 == nil })
-                if xy.holdInPlace && !held {
-                    ctx.log("\n  The embryo mask of embryo \(p) is empty at some timepoint, so the body is not held in place.")
-                }
-                let placed = Anchor.transforms(steps: steps[p], poses: held ? poses[p] : nil, smoothing: xy.smoothing,
-                                               width: src.x, height: src.y)
-                transforms.append(placed)
-                shifts[p] = placed.map { let m = $0.apply(x: midX, y: midY); return (m.y - midY, m.x - midX) }
+        for p in 0..<P {
+            let held = xy.holdInPlace && !poses[p].contains(where: { $0 == nil })
+            if xy.holdInPlace && !held {
+                ctx.log("\n  The embryo mask of embryo \(p) is empty at some timepoint, so the body is not held in place.")
             }
+            transforms.append(Anchor.transforms(steps: steps[p], poses: held ? poses[p] : nil, smoothing: xy.smoothing,
+                                                width: src.x, height: src.y))
         }
+        let shifts = transforms.map { $0.map { m -> (dy: Double, dx: Double) in let q = m.apply(x: midX, y: midY); return (q.y - midY, q.x - midX) } }
         result.shifts = shifts
         result.transforms = transforms
 
@@ -323,14 +242,9 @@ public final class AlignPipeline {
         ctx.log("\nShift summary (pixels):")
         ctx.log(PyFormat.fmt("  dy  min=%+.1f  max=%+.1f  mean=%+.1f", dys.min() ?? 0, dys.max() ?? 0, mean(dys)))
         ctx.log(PyFormat.fmt("  dx  min=%+.1f  max=%+.1f  mean=%+.1f", dxs.min() ?? 0, dxs.max() ?? 0, mean(dxs)))
-        var pad = Padding.none
-        if xyopt != nil {
-            let angles = transforms.flatMap { $0.map { $0.degrees } }
-            ctx.log(PyFormat.fmt("  angle  min=%+.1f  max=%+.1f degrees", angles.min() ?? 0, angles.max() ?? 0))
-            if options.enlargeCanvas { pad = Padding.covering(transforms: transforms.flatMap { $0 }, width: src.x, height: src.y) }
-        } else if options.enlargeCanvas {
-            pad = Padding.covering(dys: dys, dxs: dxs)
-        }
+        let angles = transforms.flatMap { $0.map { $0.degrees } }
+        ctx.log(PyFormat.fmt("  angle  min=%+.1f  max=%+.1f degrees", angles.min() ?? 0, angles.max() ?? 0))
+        let pad = options.enlargeCanvas ? Padding.covering(transforms: transforms.flatMap { $0 }, width: src.x, height: src.y) : .none
         ctx.log("\nCanvas padding:  top=\(pad.top)  bottom=\(pad.bottom)  left=\(pad.left)  right=\(pad.right)")
         let Y = src.y + pad.top + pad.bottom, X = src.x + pad.left + pad.right
         ctx.log("  Expanded canvas: Y=\(Y)  X=\(X)")
@@ -364,9 +278,8 @@ public final class AlignPipeline {
                 try orderedPipeline(count: kept.count, width: width, context: ctx, produce: { index -> (Volume, [[UInt8]]) in
                     let t = kept[index]
                     let frame = try cache.take(p * T + t) ?? src.readFrame(t: t, p: p)
-                    let s = shifts[p][t]
-                    var out = xyopt != nil ? try self.backend.warp(frame, pad: pad, transform: transforms[p][t])
-                                           : try self.backend.shift(frame, pad: pad, dy: s.dy, dx: s.dx, mode: self.options.shiftMode)
+                    // The transforms hold the kept timepoints only.
+                    var out = try self.backend.warp(frame, pad: pad, transform: transforms[p][index])
                     var gray: [[UInt8]] = []
                     if aligned != nil { gray = ChannelMovies.grayFrames(try self.backend.maxProjectAll(out)) }
                     // Move whole slices and leave the gaps empty. The movie frames are made before this step

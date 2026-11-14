@@ -8,12 +8,9 @@ public struct ZCorrectionOptions: Sendable {
     public var channelIndex: Int?
     public var channelName: String?
     public var region: FollowRegion = .wholeFrame
-    /// The timepoint whose slices stay where they are. Every other timepoint moves to match it.
-    /// The app and the command line do not show this setting yet, so change it here.
-    public var referenceTimepoint = 0
     /// The dead band of the rounding to whole slices, which `ZDrift.plan` describes.
     public var deadBand = 0.15
-    /// Leave out timepoints whose movement from the timepoint before them exceeds this many slices.
+    /// Leave out timepoints whose movement from the last kept timepoint exceeds this many slices.
     public var maximumStep: Double?
     /// Each timepoint is also compared with the one this many timepoints earlier. A slow movement is too small to
     /// measure between neighbours, and the comparison further back catches it. With 1 only neighbours are compared.
@@ -29,23 +26,45 @@ public struct ZCorrectionOptions: Sendable {
 /// Follows one embryo through time. The descriptor of each timepoint is added in the order of time.
 final class ZTracker {
     let options: ZCorrectionOptions
-    /// The last few timepoints, each with the xy step that moves it onto the timepoint before it.
-    private var recent: [(descriptor: ZDescriptor, step: Rigid)] = []
+    /// This holds the last few kept timepoints. Each has the xy step that moves it onto the kept timepoint before it,
+    /// and whether its match was good.
+    private var recent: [(descriptor: ZDescriptor, step: Rigid, good: Bool)] = []
+    /// When the timepoint before this one was dropped, this holds it with the xy step that moves it onto the last
+    /// kept timepoint. It shows whether a large move stayed.
+    private var dropped: (descriptor: ZDescriptor, step: Rigid)?
+    /// This holds the measurement of every timepoint, kept or dropped, for the log and the table.
     private(set) var steps: [ZStep] = []
+    /// These timepoints are written. The others moved further than `maximumStep` and are dropped.
+    private(set) var kept: [Int] = []
+    /// Each edge compares two kept timepoints. `i` and `j` count the kept timepoints only, because the positions are
+    /// solved for the kept timepoints alone.
     private var edges: [(i: Int, j: Int, d: Double)] = []
 
     init(options: ZCorrectionOptions) { self.options = options }
 
-    /// Compare the timepoint with the previous one and store the result. `step` is the xy transform that moves
-    /// this timepoint onto the previous one. `describe` returns the descriptor of this timepoint after it is moved
-    /// in xy by the transform it is given. The timepoint is also compared with the one `span` timepoints earlier,
-    /// where a slow movement is large enough to measure.
+    /// Compare the timepoint with the last kept one and store the result. `step` is the xy transform that moves
+    /// this timepoint onto the last kept one. `describe` returns the descriptor of this timepoint after it is moved
+    /// in xy by the transform it is given. The timepoint is also compared with the kept one `span` places earlier,
+    /// where a slow movement is large enough to measure. A dropped timepoint takes no part in later comparisons,
+    /// so the timepoints after it are measured as if it was never recorded.
     @discardableResult
     func add(step: Rigid = .identity, describe: (Rigid) -> ZDescriptor) -> ZStep {
         let t = steps.count
         let s = recent.last.map { ZDrift.match($0.descriptor, describe(step)) } ?? ZStep()
         steps.append(s)
-        if t > 0 { edges.append((t - 1, t, s.dz)) }
+        if let limit = options.maximumStep, t > 0, abs(s.dz) > limit {
+            // The timepoint is far from the last kept one. It is dropped unless the timepoint before it was dropped
+            // at the same place, which means that the tissue moved there and stayed.
+            let stayed = dropped.map { abs(ZDrift.match($0.descriptor, describe($0.step.inverse.after(step))).dz) <= limit } ?? false
+            if !stayed {
+                dropped = (describe(.identity), step)
+                return s
+            }
+        }
+        dropped = nil
+        let n = kept.count
+        kept.append(t)
+        if n > 0 { edges.append((n - 1, n, s.dz)) }
         let span = options.span
         if span > 1 && recent.count >= span {
             // Join the xy steps of the timepoints in between, so that this timepoint lands on the earlier one.
@@ -53,18 +72,28 @@ final class ZTracker {
             for k in stride(from: recent.count - 1, through: recent.count - span + 1, by: -1) { joined = recent[k].step.after(joined) }
             let far = ZDrift.match(recent[recent.count - span].descriptor, describe(joined))
             // Use the comparison only when it and every step it spans matched well.
-            if far.flag.isEmpty && steps[(t - span + 1)...t].allSatisfy({ $0.flag.isEmpty }) { edges.append((t - span, t, far.dz)) }
+            if far.flag.isEmpty && s.flag.isEmpty && recent.suffix(span - 1).allSatisfy({ $0.good }) { edges.append((n - span, n, far.dz)) }
         }
         // Keep this timepoint in its own frame, where later timepoints are moved onto it.
-        recent.append((describe(.identity), step))
+        recent.append((describe(.identity), step, s.flag.isEmpty))
         if recent.count > max(1, span) { recent.removeFirst() }
         return s
     }
 
-    /// Return the shift of every timepoint in whole slices.
+    /// Return the shift of every timepoint in whole slices. The shifts are worked out from the kept timepoints.
     func plan(pad: Bool) -> ZPlan {
-        ZDrift.plan(steps: steps.map { $0.dz }, positions: ZDrift.positions(count: steps.count, edges: edges),
-                    reference: options.referenceTimepoint, deadBand: options.deadBand, pad: pad, maximumStep: options.maximumStep)
+        let part = ZDrift.plan(steps: kept.map { steps[$0].dz }, positions: ZDrift.positions(count: kept.count, edges: edges),
+                               deadBand: options.deadBand, pad: pad)
+        // A dropped timepoint is listed in the table with its position measured from the last kept timepoint.
+        var position = [Double](repeating: 0, count: steps.count), shift = [Int](repeating: 0, count: steps.count)
+        var k = -1
+        for t in steps.indices {
+            let isKept = k + 1 < kept.count && kept[k + 1] == t
+            if isKept { k += 1 }
+            position[t] = part.position[k] + (isKept ? 0 : steps[t].dz)
+            shift[t] = part.shift[k]
+        }
+        return ZPlan(position: position, shift: shift, padLow: part.padLow, padHigh: part.padHigh, kept: kept)
     }
 }
 
@@ -123,7 +152,7 @@ public enum ZReport {
     }
 }
 
-/// The measurement pass that the two z tools without xy alignment share.
+/// The measurement pass of the z correction without xy alignment.
 enum ZPass {
     /// Measure every timepoint of one position in the order of time and return the tracker that holds the result.
     /// The frames are not moved in xy. The embryo mask needs the threshold settings and a compute backend.
@@ -166,35 +195,6 @@ enum ZPass {
     static func describeRun(_ src: FrameSource, _ meta: ImageMetadata, channel: Int) -> String {
         let name = channel < meta.channelNames.count ? meta.channelNames[channel] : "ch\(channel)"
         return "Z drift of \(name) (index \(channel)), T=\(src.t), Z=\(src.z)"
-    }
-}
-
-/// Measure the z drift of a file and save the table without writing a corrected stack (`dc z-shifts`).
-/// The frames are not aligned in xy first.
-public enum ZMeasure {
-    public struct Result {
-        public var steps: [ZStep]
-        public var plan: ZPlan
-        public var csv: URL?
-    }
-
-    public static func run(source src: FrameSource, position p: Int = 0, options: ZCorrectionOptions,
-                           thresholds: ThresholdConfig? = nil, backend: ComputeBackend? = nil,
-                           csv: URL?, context ctx: RunContext) throws -> Result {
-        guard p >= 0 && p < src.positions else { throw DCError("Position \(p) is out of range (the file has \(src.positions))") }
-        let meta = src.metadata(position: p)
-        let channel = try options.resolveChannel(names: meta.channelNames, count: src.c,
-                                                 fallback: thresholds?.parameters.channelIndex ?? 0)
-        ctx.log(ZPass.describeRun(src, meta, channel: channel))
-        let tracker = try ZPass.measure(source: src, position: p, options: options, channel: channel, thresholds: thresholds,
-                                        backend: backend, cache: nil, context: ctx)
-        let plan = tracker.plan(pad: true)
-        for line in ZReport.summary(steps: tracker.steps, plan: plan, z: src.z) { ctx.log(line) }
-        if let url = csv {
-            try ZReport.csv(steps: tracker.steps, plan: plan, stageZ: meta.stageZ).write(to: url, atomically: true, encoding: .utf8)
-            ctx.log("Saved \(url.lastPathComponent)")
-        }
-        return Result(steps: tracker.steps, plan: plan, csv: csv)
     }
 }
 

@@ -1,16 +1,15 @@
 """CPU (NumPy/SciPy) and CUDA (CuPy).
 
-Both backends give the same results. The CUDA kernels calculate in float64,
-in the same order of operations as scipy so the gaussian bl;ur and the bilinear intrepolation shift are bit-identical to
-`scipy.ndimage.gaussian_filter` and `scipy.ndimage.shift(order=1)`.
+Both backends give the same results. The CUDA Gaussian calculates in float64, in the same order of operations as
+scipy, so it is identical to `scipy.ndimage.gaussian_filter`.
 
 The GPU is used automatically when CuPy and an NVIDIA GPU are available.
 Set the environment variable DRIFT_CORRECT_CPU=1 (or pass --cpu to a worker)
 to force the CPU backend.
 
-Only the heavy per-frame operations run here like max projection,
-blur and the shift. Percentiles, labelling and Otsu stay on the CPU in
-useful_functions.py, where their NumPy/SciPy results are the reference.
+Only the heavy operations on every frame run here, which are the maximum projection, the blur and the move.
+Percentiles, labelling and Otsu stay on the CPU in useful_functions.py, where their NumPy/SciPy results are the
+reference.
 """
 
 import math
@@ -18,10 +17,7 @@ import os
 import threading
 
 import numpy as np
-from scipy.ndimage import affine_transform, gaussian_filter, shift as nd_shift
-
-SHIFT_MODES = ("subpixel", "integer")
-
+from scipy.ndimage import affine_transform, gaussian_filter
 
 
 def gaussian_kernel(sigma, truncate=4.0):
@@ -32,19 +28,6 @@ def gaussian_kernel(sigma, truncate=4.0):
     phi = np.exp(-0.5 / (sd * sd) * x ** 2)
     phi = phi / phi.sum()
     return phi, radius
-
-
-def axis_table(n, s):
-    """Per-row or per-column bilinear table in float64
-
-    Returns int32 (i0, i1, valid) and float64 (w0, w1) arrays of length n.
-    """
-    c = np.arange(n, dtype=np.float64) - float(s)
-    valid = (c >= 0) & (c <= n - 1)
-    i0 = np.floor(np.where(valid, c, 0)).astype(np.int64)
-    t = np.where(valid, c - i0, 0.0)
-    i1 = np.minimum(i0 + 1, n - 1)
-    return i0.astype(np.int32), i1.astype(np.int32), valid.astype(np.int32), 1.0 - t, t
 
 
 class CPUBackend:
@@ -61,20 +44,6 @@ class CPUBackend:
 
     def max_project_all(self, frame):
         return np.asarray(frame).max(axis=1).astype(np.float32)
-
-    def shift(self, frame, pad, dy, dx, mode):
-        """Shift all (C, Z) planes on the frame padded by pad=(top, bottom, left, right).
-
-        Returns uint16 (C, Z, Y + top + bottom, X + left + right).
-        """
-        top, bottom, left, right = pad
-        f = np.asarray(frame, dtype=np.float32)
-        if any(pad):
-            f = np.pad(f, ((0, 0), (0, 0), (top, bottom), (left, right)))
-        if mode == "integer":
-            return _integer_shift(np, f, dy, dx).clip(0, 65535).astype(np.uint16)
-        out = nd_shift(f, (0, 0, float(dy), float(dx)), order=1, mode="constant", cval=0)
-        return out.clip(0, 65535).astype(np.uint16)
 
     def warp(self, frame, pad, transform):
         """Move all (C, Z) planes by a rotation and a shift onto the frame padded by pad=(top, bottom, left, right).
@@ -105,14 +74,6 @@ def _warp_arguments(pad, transform):
     placed = np.array([[1, 0, left], [0, 1, top], [0, 0, 1.0]]) @ np.asarray(transform, dtype=float)
     back = np.linalg.inv(placed)
     return [[back[1, 1], back[1, 0]], [back[0, 1], back[0, 0]]], (back[1, 2], back[0, 2])
-
-
-def _integer_shift(xp, f, dy, dx):
-    """apply_shift_xy_gpu: pad with zeros on the side content moves away from, then slice."""
-    iy, ix = int(round(float(dy))), int(round(float(dx)))
-    Y, X = f.shape[-2:]
-    p = xp.pad(f, ((0, 0), (0, 0), (max(iy, 0), max(-iy, 0)), (max(ix, 0), max(-ix, 0))))
-    return p[:, :, max(-iy, 0):max(-iy, 0) + Y, max(-ix, 0):max(-ix, 0) + X]
 
 
 CUDA_SOURCE = r"""
@@ -146,43 +107,6 @@ __global__ void gaussian_pass(const float* __restrict__ src, float* __restrict__
     dst[(long long)y * width + x] = (float)acc;
 }
 
-// scipy.ndimage.shift(order=1, mode="constant") of float32 planes on a padded canvas,
-// then clip(0, 65535).astype(uint16). Tables come from axis_table() on the host.
-__global__ void shift_bilinear(const float* __restrict__ src, unsigned short* __restrict__ dst,
-                               const int* __restrict__ ry0, const int* __restrict__ ry1, const int* __restrict__ rv,
-                               const double* __restrict__ rw0, const double* __restrict__ rw1,
-                               const int* __restrict__ cx0, const int* __restrict__ cx1, const int* __restrict__ cv,
-                               const double* __restrict__ cw0, const double* __restrict__ cw1,
-                               int outW, int outH, int srcW, int srcH, int padTop, int padLeft, int planes) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int plane = blockIdx.z;
-    if (x >= outW || y >= outH || plane >= planes) return;
-    long long o = ((long long)plane * outH + y) * outW + x;
-    if (!rv[y] || !cv[x]) { dst[o] = 0; return; }
-    const float* s = src + (long long)plane * srcW * srcH;
-    int ys[2] = {ry0[y], ry1[y]};
-    int xs[2] = {cx0[x], cx1[x]};
-    double wy[2] = {rw0[y], rw1[y]};
-    double wx[2] = {cw0[x], cw1[x]};
-    double acc = 0.0;
-    for (int a = 0; a < 2; ++a) {
-        for (int b = 0; b < 2; ++b) {
-            int sy = ys[a] - padTop, sx = xs[b] - padLeft;
-            double v = (sy < 0 || sy >= srcH || sx < 0 || sx >= srcW) ? 0.0 : (double)s[(long long)sy * srcW + sx];
-            double c = v * wy[a];
-            c = c * wx[b];
-            acc += c;
-        }
-    }
-    float f = (float)acc;
-    unsigned short u;
-    if (!(f > 0.0f)) u = 0;
-    else if (f >= 65535.0f) u = 65535;
-    else u = (unsigned short)f;
-    dst[o] = u;
-}
-
 }
 """
 
@@ -203,7 +127,6 @@ class CudaBackend:
 
         module = cp.RawModule(code=CUDA_SOURCE, options=("--fmad=false", "-std=c++11")) # Disable FMA  to stay idential to scipy
         self._gauss = module.get_function("gaussian_pass")
-        self._shift = module.get_function("shift_bilinear")
         self._local = threading.local()
         # test so a broken driver falls back to the CPU at start-up.
         self.gaussian(np.ones((4, 4), np.float32), 1.0)
@@ -248,30 +171,6 @@ class CudaBackend:
             out = cp.asnumpy(cp.asarray(frame).max(axis=1).astype(cp.float32), stream=stream)
             stream.synchronize()
         return out
-
-    def shift(self, frame, pad, dy, dx, mode):
-        cp = self.cp
-        top, bottom, left, right = pad
-        C, Z, Y, X = frame.shape
-        H, W = Y + top + bottom, X + left + right
-        with self._stream() as stream:
-            f = cp.asarray(frame).astype(cp.float32, copy=False)
-            if mode == "integer":
-                if any(pad):
-                    f = cp.pad(f, ((0, 0), (0, 0), (top, bottom), (left, right)))
-                out = _integer_shift(cp, f, dy, dx).clip(0, 65535).astype(cp.uint16)
-            else:
-                f = cp.ascontiguousarray(f)
-                out = cp.empty((C, Z, H, W), dtype=cp.uint16)
-                rows = [cp.asarray(a) for a in axis_table(H, dy)]
-                cols = [cp.asarray(a) for a in axis_table(W, dx)]
-                block = (32, 8, 1)
-                grid = ((W + 31) // 32, (H + 7) // 8, C * Z)
-                self._shift(grid, block, (f, out, *rows, *cols, np.int32(W), np.int32(H), np.int32(X), np.int32(Y),
-                                          np.int32(top), np.int32(left), np.int32(C * Z)))
-            result = cp.asnumpy(out, stream=stream)
-            stream.synchronize()
-        return result
 
     def warp(self, frame, pad, transform):
         """Move all planes by a rotation and a shift on the GPU. The result is the same as on the CPU up to

@@ -60,22 +60,6 @@ final class MetalParityTests: XCTestCase {
         return v
     }
 
-    func testShiftBitExact() throws {
-        for type in [SampleType.uint16, .float32, .uint8] {
-            let frame = volume(c: 2, z: 3, y: 101, x: 87, type: type, seed: 7)
-            for (dy, dx, pad) in [(2.3, -1.7, Padding.none), (13.370158730158735, -7.654321098765432, Padding(top: 0, bottom: 14, left: 8, right: 0)),
-                                  (-0.5, 0.25, Padding(top: 3, bottom: 3, left: 3, right: 3)), (2.5, -3.5, Padding.none)] {
-                for mode in ShiftMode.allCases {
-                    let a = try gpu.shift(frame, pad: pad, dy: dy, dx: dx, mode: mode)
-                    let b = try cpu.shift(frame, pad: pad, dy: dy, dx: dx, mode: mode)
-                    let pa = UnsafeBufferPointer(start: a.storage.raw.assumingMemoryBound(to: UInt16.self), count: a.elementCount)
-                    let pb = UnsafeBufferPointer(start: b.storage.raw.assumingMemoryBound(to: UInt16.self), count: b.elementCount)
-                    XCTAssertTrue(pa.elementsEqual(pb), "\(type) \(mode) dy=\(dy) dx=\(dx)")
-                }
-            }
-        }
-    }
-
     func testWarpMatchesCPU() throws {
         for type in [SampleType.uint16, .float32, .uint8] {
             let frame = volume(c: 2, z: 3, y: 101, x: 87, type: type, seed: 11)
@@ -116,22 +100,26 @@ final class MetalParityTests: XCTestCase {
         XCTAssertEqual(a.dx, b.dx, accuracy: 1e-9)
     }
 
-    func testHEVCWriterProducesMovie() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("dc_\(UUID().uuidString).mp4")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let (w, h) = (257, 191)  // Odd sizes are padded to even.
-        let writer = try HEVCMovieWriter(url: url, width: w, height: h, fps: 2)
-        for t in 0..<6 {
-            var frame = [UInt8](repeating: 0, count: w * h)
-            for i in 0..<frame.count { frame[i] = UInt8((i + t * 13) % 256) }
-            try writer.append(gray: frame)
+    func testMovieWriterProducesHEVCAndH264() throws {
+        for (codec, type) in [(MovieCodec.hevc, kCMVideoCodecType_HEVC), (.h264, kCMVideoCodecType_H264)] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("dc_\(UUID().uuidString).mp4")
+            defer { try? FileManager.default.removeItem(at: url) }
+            let (w, h) = (257, 191)  // Odd sizes are padded to even.
+            let writer = try MovieFileWriter(url: url, width: w, height: h, fps: 2, codec: codec, quality: 40)
+            for t in 0..<6 {
+                var frame = [UInt8](repeating: 0, count: w * h)
+                for i in 0..<frame.count { frame[i] = UInt8((i + t * 13) % 256) }
+                try writer.append(gray: frame)
+            }
+            try writer.finish()
+            let asset = AVURLAsset(url: url)
+            let tracks = asset.tracks(withMediaType: .video)
+            XCTAssertEqual(tracks.count, 1)
+            XCTAssertEqual(tracks.first?.naturalSize, CGSize(width: 258, height: 192))
+            XCTAssertEqual(CMTimeGetSeconds(asset.duration), 3.0, accuracy: 0.01)
+            let format = tracks.first?.formatDescriptions.first.map { $0 as! CMFormatDescription }
+            XCTAssertEqual(format.map { CMFormatDescriptionGetMediaSubType($0) }, type, "\(codec)")
         }
-        try writer.finish()
-        let asset = AVURLAsset(url: url)
-        let tracks = asset.tracks(withMediaType: .video)
-        XCTAssertEqual(tracks.count, 1)
-        XCTAssertEqual(tracks.first?.naturalSize, CGSize(width: 258, height: 192))
-        XCTAssertEqual(CMTimeGetSeconds(asset.duration), 3.0, accuracy: 0.01)
     }
 }
 #endif

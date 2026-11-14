@@ -1,8 +1,8 @@
 """Entry point for the drift-correction tools.
 
 With no arguments it opens the launcher. "--tool MODE [ARGS…]" runs one tool:
-a window (convert-gui, mask-gui, align-gui) or a worker process that a window
-starts (convert-worker, align-worker). Workers take the same arguments as
+a window (convert-gui, mask-gui, align-gui, export-gui) or a worker process
+that a window starts (convert-worker, align-worker, export-worker). Workers take the same arguments as
 their scripts.
 """
 
@@ -11,13 +11,14 @@ their scripts.
 import argparse
 import sys
 
-GUI_MODES = ("convert-gui", "mask-gui", "align-gui")
-WORKER_MODES = ("convert-worker", "align-worker")
+GUI_MODES = ("convert-gui", "mask-gui", "align-gui", "export-gui")
+WORKER_MODES = ("convert-worker", "align-worker", "export-worker")
 
 # The Mask window is not in the launcher. The Alignment window opens it when a run needs the embryo mask.
 TOOLS = (
     ("Convert ND2 to TIFF", "convert-gui"),
     ("Align movie", "align-gui"),
+    ("Export movies", "export-gui"),
 )
 
 
@@ -100,10 +101,14 @@ def entry_point(mode):
         from find_threshold import main
     elif mode == "align-gui":
         from centroid_align_xy_gui import main
+    elif mode == "export-gui":
+        from export_gui import main
     elif mode == "convert-worker":
         from nd2_to_tif import main
     elif mode == "align-worker":
         from centroid_align_xy import main
+    elif mode == "export-worker":
+        from export_movies import main
 
     else:
         main = launcher_main

@@ -105,13 +105,10 @@ final class ZCorrectionTests: XCTestCase {
 
     func testPlanDeadBandAndPadding() {
         // The positions are 0, 0.55, 0.75, 2.75 and -0.65. The shift changes only when the position is 0.65 away from it.
-        let plan = ZDrift.plan(steps: [0, 0.55, 0.2, 2.0, -3.4], reference: 0, deadBand: 0.15, pad: true)
+        let plan = ZDrift.plan(steps: [0, 0.55, 0.2, 2.0, -3.4], deadBand: 0.15, pad: true)
         XCTAssertEqual(plan.shift, [0, 0, -1, -3, 1])
         XCTAssertEqual(plan.padLow, 3)
         XCTAssertEqual(plan.padHigh, 1)
-        // A later reference timepoint keeps its own slices in place.
-        let late = ZDrift.plan(steps: [0, 2, 0, -5], reference: 2)
-        XCTAssertEqual(late.shift, [2, 0, 0, 5])
         XCTAssertEqual(ZDrift.plan(steps: [0, 2, 0, -5], pad: false).padLow, 0)
     }
 
@@ -131,11 +128,12 @@ final class ZCorrectionTests: XCTestCase {
         let offsets = [0, 0, 3, 3, -2, -1]
         let expected: [Double] = [0, 0, -3, 0, 5, -1]
         for stage in [false, true] {
-            let src = try TIFFSource(url: try writeMovie("m\(stage).ome.tif", offsets: offsets, stage: stage))
+            let url = try writeMovie("m\(stage).ome.tif", offsets: offsets, stage: stage)
+            let src = try TIFFSource(url: url)
             for region in [FollowRegion.wholeFrame, .box(x: 50, y: 50, width: 64, height: 64)] {
-                var o = ZCorrectionOptions()
-                o.region = region
-                let r = try ZMeasure.run(source: src, options: o, csv: nil, context: .silent())
+                var o = ZCorrectOptions(input: url)
+                o.z.region = region
+                let r = try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent())
                 for (t, e) in expected.enumerated() {
                     XCTAssertEqual(r.steps[t].dz, e, accuracy: 0.3, "t\(t) stage=\(stage) \(region)")
                     XCTAssertEqual(r.steps[t].flag, "", "t\(t)")
@@ -145,7 +143,9 @@ final class ZCorrectionTests: XCTestCase {
                 XCTAssertEqual(r.plan.padHigh, 3)
             }
             // After placing, every timepoint shows the same scene plane in a given output slice.
-            let r = try ZMeasure.run(source: src, options: wholeFrame, csv: nil, context: .silent())
+            var o = ZCorrectOptions(input: url)
+            o.z = wholeFrame
+            let r = try ZCorrectPipeline.run(options: o, backend: CPUBackend(), context: .silent())
             let k = r.plan.padLow + 6
             let reference = ZDrift.place(try src.readFrame(t: 0, p: 0), shift: r.plan.shift[0], padLow: r.plan.padLow, padHigh: r.plan.padHigh)
             for t in 1..<offsets.count {
@@ -203,7 +203,7 @@ final class ZCorrectionTests: XCTestCase {
         source:
           file: \(tif.path)
         """.write(to: yaml, atomically: true, encoding: .utf8)
-        var opts = AlignOptions(yaml: yaml)
+        var opts = AlignOptions(source: tif, yaml: yaml)
         opts.zCorrection = ZCorrectionOptions()
         opts.zCorrection?.region = .embryoMask
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
@@ -225,17 +225,19 @@ final class ZCorrectionTests: XCTestCase {
         _ = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(try TIFFStack(url: tmp.appendingPathComponent("aligned_P0_concat/P0_concat_xy.ome.tif")).z, Self.slices)
     }
-    func testDroppedFramesPreserveCumulativeShiftsAndCoverage() {
-        let p = ZDrift.plan(steps: [0, 6, 0, 1, -7, 0], maximumStep: 5)
-        XCTAssertEqual(p.kept, [0, 2, 3, 5])
-        XCTAssertEqual(p.shift, [0, -6, -6, -7, 0, 0])
-        let spike = ZDrift.plan(steps: [0, 8, -8, 0], maximumStep: 5)
-        XCTAssertEqual(spike.kept, [0, 3])
-        XCTAssertEqual(spike.padLow, 0)
-        XCTAssertEqual(spike.padHigh, 0)
-        let lines = ZReport.summary(steps: [ZStep(), ZStep(), ZStep(), ZStep()], plan: spike, z: 14)
-        XCTAssertEqual(Array(lines.suffix(14)), (1...14).map { "\($0)" + ($0 < 14 ? "," : "") })
-        XCTAssertEqual(ZDrift.plan(steps: [0, 5], maximumStep: 5).kept, [0, 1])
+    func testDropComparesWithTheLastKeptTimepoint() throws {
+        // One timepoint that jumps and comes back is dropped, and the timepoint after it is kept.
+        var options = ZCorrectOptions(input: try writeMovie("spike.ome.tif", offsets: [0, 0, 4, 0, 1], stage: false))
+        options.z = wholeFrame
+        options.z.maximumStep = 2
+        let spike = try ZCorrectPipeline.run(options: options, backend: CPUBackend(), context: .silent())
+        XCTAssertEqual(spike.plan.kept, [0, 1, 3, 4])
+        XCTAssertEqual(spike.plan.padLow + spike.plan.padHigh, 1)
+        // A jump that stays drops only its first timepoint.
+        options.input = try writeMovie("jump.ome.tif", offsets: [0, 0, 4, 4, 5], stage: false)
+        let jump = try ZCorrectPipeline.run(options: options, backend: CPUBackend(), context: .silent())
+        XCTAssertEqual(jump.plan.kept, [0, 1, 3, 4])
+        XCTAssertEqual(jump.plan.padLow + jump.plan.padHigh, 5)
     }
 
     func testDropOutputKeepsOriginalTimesAndMetadata() throws {
@@ -247,7 +249,8 @@ final class ZCorrectionTests: XCTestCase {
             options.lowMemory = lowMemory
             let result = try ZCorrectPipeline.run(options: options, backend: CPUBackend(), context: .silent())
             XCTAssertEqual(result.plan.kept, [0, 1, 3, 5])
-            XCTAssertEqual(result.plan.shift, [0, 0, 3, 3, -2, -1])
+            // A dropped timepoint is listed with the shift of the last kept timepoint before it.
+            XCTAssertEqual(result.plan.shift, [0, 0, 0, 3, 3, -1])
             let stack = try TIFFStack(url: result.tiff)
             XCTAssertEqual(stack.t, 4)
             XCTAssertEqual(stack.z, 18)
@@ -286,7 +289,7 @@ final class ZCorrectionTests: XCTestCase {
           file: \(tif.path)
         """.write(to: yaml, atomically: true, encoding: .utf8)
         for enlarge in [false, true] {
-            var options = AlignOptions(yaml: yaml)
+            var options = AlignOptions(source: tif, yaml: yaml)
             options.zCorrection = ZCorrectionOptions()
             options.zCorrection?.maximumStep = 2
             options.enlargeCanvas = enlarge
@@ -391,10 +394,9 @@ final class ZCorrectionTests: XCTestCase {
         let tif = try writeMovie("P0_concat.ome.tif", offsets: [0, 0, 0, 0, 0], moves: moves, stage: false)
         let yaml = try writeYAML(for: tif)
         for region in [FollowRegion.wholeFrame, .embryoMask, .box(x: 40, y: 40, width: 80, height: 80)] {
-            var opts = AlignOptions(yaml: yaml)
-            opts.xyMatching = XYMatchOptions()
-            opts.xyMatching?.region = region
-            opts.xyMatching?.holdInPlace = false
+            var opts = AlignOptions(source: tif, yaml: yaml)
+            opts.xyMatching.region = region
+            opts.xyMatching.holdInPlace = false
             let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
             // Every timepoint moves back onto the first one.
             for (t, m) in moves.enumerated() {
@@ -419,9 +421,8 @@ final class ZCorrectionTests: XCTestCase {
         let offsets = [0, 2, 2, -1]
         let moves = [(0, 0), (6, -5), (-8, 11), (-7, 12)]
         let tif = try writeMovie("P0_concat.ome.tif", offsets: offsets, moves: moves, stage: false)
-        var opts = AlignOptions(yaml: try writeYAML(for: tif))
-        opts.xyMatching = XYMatchOptions()
-        opts.xyMatching?.holdInPlace = false
+        var opts = AlignOptions(source: tif, yaml: try writeYAML(for: tif))
+        opts.xyMatching.holdInPlace = false
         opts.zCorrection = ZCorrectionOptions()
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(r.zPlans[0].shift, offsets)
@@ -445,8 +446,7 @@ final class ZCorrectionTests: XCTestCase {
         // timepoint, with the centre of the bright disc in the middle of the frame.
         let moves = [(0, 0), (4, -3), (9, 2), (-12, 15), (-10, 14), (3, 3)]
         let tif = try writeMovie("P0_concat.ome.tif", offsets: [0, 0, 0, 0, 0, 0], moves: moves, stage: false)
-        var opts = AlignOptions(yaml: try writeYAML(for: tif))
-        opts.xyMatching = XYMatchOptions()
+        var opts = AlignOptions(source: tif, yaml: try writeYAML(for: tif))
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         let out = try TIFFStack(url: r.tiffs[0])
         let first = try out.readFrame(0).floatPlane(6)
@@ -463,5 +463,70 @@ final class ZCorrectionTests: XCTestCase {
         let pad = Padding.covering(transforms: r.transforms[0], width: Self.size, height: Self.size)
         XCTAssertEqual(sx / n - Double(pad.left), Double(Self.size - 1) / 2, accuracy: 3)
         XCTAssertEqual(sy / n - Double(pad.top), Double(Self.size - 1) / 2, accuracy: 3)
+    }
+
+    /// A movie writer that keeps the frames in memory.
+    final class RecordedMovie: MovieWriter {
+        var frames: [[UInt8]] = []
+        var finished = false
+        func append(gray: [UInt8]) throws { frames.append(gray) }
+        func finish() throws { finished = true }
+        func cancel() {}
+    }
+
+    final class Recorder: MovieWriterFactory {
+        var movies: [(url: URL, width: Int, height: Int, movie: RecordedMovie)] = []
+        func makeWriter(url: URL, width: Int, height: Int, fps: Double) throws -> MovieWriter {
+            let m = RecordedMovie(); movies.append((url, width, height, m)); return m
+        }
+    }
+
+    func testExportShowsSliceAndComparesSideBySide() throws {
+        let still = try writeMovie("still.ome.tif", offsets: [0, 0, 0, 0], stage: false)
+        let moved = try writeMovie("moved.ome.tif", offsets: [0, 1, 2], stage: false)
+        let n = Self.size
+
+        // A movie of one slice with the brightness of each frame matches the slice scaled on its own.
+        var o = ExportOptions(source: moved)
+        o.slice = 7
+        o.wholeMovieContrast = false
+        var recorder = Recorder()
+        _ = try ExportPipeline.run(options: o, backend: CPUBackend(), movies: recorder, context: .silent())
+        XCTAssertEqual(recorder.movies.map { $0.url.lastPathComponent }, ["moved_nuc_z7.mp4"])
+        let source = try TIFFSource(url: moved)
+        for t in 0..<3 {
+            let plane = try source.readFrame(t: t, p: 0).floatPlane(6)
+            XCTAssertEqual(recorder.movies[0].movie.frames[t], Contrast.autoContrast(plane), "t\(t)")
+        }
+
+        // With the brightness of the whole movie, a scene that does not change gives the same frame every time.
+        o = ExportOptions(source: still)
+        recorder = Recorder()
+        _ = try ExportPipeline.run(options: o, backend: CPUBackend(), movies: recorder, context: .silent())
+        let frames = recorder.movies[0].movie.frames
+        XCTAssertEqual(frames.count, 4)
+        for f in frames { XCTAssertEqual(f, frames[0]) }
+        XCTAssertTrue(recorder.movies[0].movie.finished)
+
+        // The second movie sits to the right, and the export stops after the shorter movie.
+        o.compare = moved
+        recorder = Recorder()
+        _ = try ExportPipeline.run(options: o, backend: CPUBackend(), movies: recorder, context: .silent())
+        let side = recorder.movies[0]
+        XCTAssertEqual(side.url.lastPathComponent, "still_nuc_max_vs_moved.mp4")
+        XCTAssertEqual(side.width, 2 * n)
+        XCTAssertEqual(side.height, n)
+        XCTAssertEqual(side.movie.frames.count, 3)
+        // Timepoint 0 of both movies is the same stack. With the brightness of each frame, the two halves of the first
+        // frame are equal. With the brightness of the whole movie, each side takes its own.
+        o.wholeMovieContrast = false
+        recorder = Recorder()
+        _ = try ExportPipeline.run(options: o, backend: CPUBackend(), movies: recorder, context: .silent())
+        let first = recorder.movies[0].movie.frames[0]
+        for y in 0..<n { XCTAssertEqual(first[(y * 2 * n)..<(y * 2 * n + n)], first[(y * 2 * n + n)..<(y * 2 * n + 2 * n)]) }
+
+        // A slice outside the stack is refused.
+        o.slice = Self.slices + 1
+        XCTAssertThrowsError(try ExportPipeline.run(options: o, backend: CPUBackend(), movies: Recorder(), context: .silent()))
     }
 }

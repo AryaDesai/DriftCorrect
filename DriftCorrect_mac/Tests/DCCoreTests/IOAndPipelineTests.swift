@@ -134,44 +134,6 @@ final class IOAndPipelineTests: XCTestCase {
         }
     }
 
-    func testAlignMatchesPython() throws {
-        let src = Ref.url("align")
-        let work = tmp.appendingPathComponent("align")
-        try FileManager.default.copyItem(at: src, to: work)
-        // The YAML refers to the TIFF by absolute path, so point it at the copy.
-        for name in ["percentile.yaml", "multi.yaml"] {
-            let u = work.appendingPathComponent(name)
-            var text = try String(contentsOf: u, encoding: .utf8)
-            if let line = text.split(separator: "\n").first(where: { $0.contains("file:") }) {
-                text = text.replacingOccurrences(of: String(line), with: "  file: \(work.appendingPathComponent("P0_concat.ome.tif").path)")
-            }
-            try text.write(to: u, atomically: true, encoding: .utf8)
-        }
-        for c in Ref.cases("align") {
-            let yamlName = (c["yaml"] as! String).components(separatedBy: "/").last!
-            let flags = c["flags"] as! [String]
-            var opts = AlignOptions(yaml: work.appendingPathComponent(yamlName))
-            opts.enlargeCanvas = !flags.contains("--no_enlarge_canvas")
-            let outTIF = work.appendingPathComponent("aligned_P0_concat/P0_concat_xy.ome.tif")
-            let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
-            let expectedShifts = (c["shifts"] as! [[NSNumber]]).map { $0.map { $0.doubleValue } }
-            let tolerance = yamlName == "percentile.yaml" ? 0.0051 : 1e-12  // The worker logs 2 decimals.
-            for (s, e) in zip(r.shifts[0], expectedShifts) {
-                XCTAssertEqual(s.dy, e[0], accuracy: tolerance)
-                XCTAssertEqual(s.dx, e[1], accuracy: tolerance)
-            }
-            let got = try TIFFStack(url: outTIF)
-            let expected = Ref.load(c["expected"], as: UInt16.self)
-            XCTAssertEqual(try samples(got).map { UInt16($0) }, expected, "\(yamlName) \(flags)")
-            if c["expected_integer"] != nil {
-                opts.shiftMode = .integer
-                _ = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
-                let gi = try TIFFStack(url: outTIF)
-                XCTAssertEqual(try samples(gi).map { UInt16($0) }, Ref.load(c["expected_integer"], as: UInt16.self))
-            }
-        }
-    }
-
     func testOrderedPipelineKeepsOrder() throws {
         var seen: [Int] = []
         try orderedPipeline(count: 200, width: 8, context: nil, produce: { i -> Int in

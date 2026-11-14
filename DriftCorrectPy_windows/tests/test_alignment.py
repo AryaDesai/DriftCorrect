@@ -60,7 +60,8 @@ def write_movie(folder, offsets, moves):
 
 
 def run(yaml, *flags):
-    args = centroid_align_xy.parse_args([str(yaml), "--no_movies", "--cpu", *flags])
+    tif = yaml.parent / "P0_concat.ome.tif"
+    args = centroid_align_xy.parse_args([str(tif), "--yaml", str(yaml), "--no_movies", "--cpu", *flags])
     written, shifts = centroid_align_xy.align(args)
     # tifffile drops the channel axis of a file with one channel, so it is put back.
     out = tifffile.imread(written[0])
@@ -142,7 +143,7 @@ def test_image_matching_with_z_correction(tmp_path):
     moves = [(0, 0), (6, -5), (-8, 11), (-7, 12)]
     yaml = write_movie(tmp_path, offsets, moves)
     for region in (["--xy_region", "whole"], ["--xy_region", "mask"], ["--xy_region", "box", "--xy_box", "40", "40", "80", "80"]):
-        out, shifts = run(yaml, "--xy_method", "image", "--xy_no_hold", "--z_correct", *region)
+        out, shifts = run(yaml, "--xy_no_hold", "--z_correct", *region)
         # Every timepoint moves back onto the first one, in xy and in z.
         assert np.allclose(shifts[0], [(-dy, -dx) for dy, dx in moves])
         # The last timepoint moves down by one slice, so one empty slice is added below and scene plane 6 of the
@@ -157,7 +158,7 @@ def test_image_matching_holds_the_body(tmp_path):
     # The scene and its mask move together, so holding the body must put the scene in the same place at every
     # timepoint.
     moves = [(0, 0), (4, -3), (9, 2), (-12, 15), (-10, 14), (3, 3)]
-    out, _ = run(write_movie(tmp_path, [0] * 6, moves), "--xy_method", "image")
+    out, _ = run(write_movie(tmp_path, [0] * 6, moves))
     first = out[0, 0, 6].astype(float)
     for t in range(1, len(moves)):
         plane = out[t, 0, 6].astype(float)
@@ -165,11 +166,37 @@ def test_image_matching_holds_the_body(tmp_path):
         assert np.abs(plane[both] - first[both]).sum() / first[both].sum() < 0.05
 
 
-def test_centroid_method_with_z_correction(tmp_path):
-    # The centroid method shifts each timepoint by a fraction of a pixel, so the pixel values are interpolated and
-    # cannot be compared directly. The table of z shifts is checked.
+def test_z_correction_without_xy(tmp_path):
     offsets = [0, 1, 3, 3]
-    out, _ = run(write_movie(tmp_path, offsets, [(0, 0)] * 4), "--z_correct")
-    table = np.genfromtxt(tmp_path / "aligned_P0_concat" / "P0_concat_xy_z_shifts.csv", delimiter=",", names=True)
+    out, _ = run(write_movie(tmp_path, offsets, [(0, 0)] * 4), "--xy_method", "none", "--z_correct")
+    table = np.genfromtxt(tmp_path / "aligned_P0_concat" / "P0_concat_z_shifts.csv", delimiter=",", names=True)
     assert list(table["shift_slices"]) == offsets
     assert out.shape[2] == SLICES + 3
+    # Without the xy alignment the pixel values do not change, so scene plane 6 of the first timepoint is the same
+    # output slice at every timepoint.
+    k = 6 + 3
+    for t in range(1, len(offsets)):
+        assert np.array_equal(out[t, 0, k], out[0, 0, k])
+
+
+def test_drop_compares_with_the_last_kept_timepoint(tmp_path):
+    def kept(offsets):
+        tracker = z_drift.Tracker(maximum_step=2)
+        for o in offsets:
+            tracker.add(lambda m, o=o: z_drift.describe(frame(o), 0, None, m))
+        return tracker.plan()
+
+    # One timepoint that jumps and comes back is dropped, and the timepoint after it is kept.
+    spike = kept([0, 0, 4, 0, 1])
+    assert list(spike.kept) == [0, 1, 3, 4]
+    assert spike.pad_low + spike.pad_high == 1
+    # A jump that stays drops only its first timepoint.
+    jump = kept([0, 0, 4, 4, 5])
+    assert list(jump.kept) == [0, 1, 3, 4]
+    assert jump.pad_low + jump.pad_high == 5
+    # The xy matching also skips the dropped timepoint.
+    offsets, moves = [0, 0, 4, 0, 1], [(0, 0), (2, -1), (9, 7), (3, -2), (4, -2)]
+    out, _ = run(write_movie(tmp_path, offsets, moves), "--xy_no_hold", "--xy_no_rotation", "--z_correct",
+                 "--z_drop_above", "2")
+    assert out.shape[0] == 4
+

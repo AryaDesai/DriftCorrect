@@ -6,7 +6,7 @@ import DCCore
 /// The GPU implementation of `ComputeBackend` for Apple silicon.
 ///
 /// - Frames use unified memory. The storage of a `Volume`, which is aligned to pages, is wrapped in an
-///   `MTLBuffer` without a copy, and the output of a shift is written straight into the storage of the
+///   `MTLBuffer` without a copy, and the output of a move is written straight into the storage of the
 ///   result volume.
 /// - The Gaussian runs as 2 passes of 2r+1 taps. The GPU path of the Python scripts used a full kernel of
 ///   (2r+1)² taps.
@@ -30,8 +30,6 @@ public final class MetalBackend: ComputeBackend {
         }
         guard let library = try? device.makeLibrary(source: metalSource, options: options) else { return nil }
         let names = ["max_project_u16", "max_project_u8", "max_project_f32", "gaussian_pass",
-                     "shift_bilinear_u16", "shift_bilinear_f32", "shift_bilinear_u8",
-                     "shift_integer_u16", "shift_integer_f32", "shift_integer_u8",
                      "warp_u16", "warp_f32", "warp_u8"]
         for n in names {
             guard let f = library.makeFunction(name: n),
@@ -166,74 +164,6 @@ public final class MetalBackend: ComputeBackend {
             dispatch(enc, "gaussian_pass", width: image.width, height: image.height)
         }
         return Image2D(width: image.width, height: image.height, pixels: floats(c, count: image.count))
-    }
-
-    /// Return the interpolation table of one axis, computed in float64 as scipy does.
-    struct AxisEntry {
-        var i0: Int32; var i1: Int32; var valid: Int32; var pad: Int32
-        var w0: SIMD2<Float>; var w1: SIMD2<Float>
-    }
-
-    static func split(_ d: Double) -> SIMD2<Float> {
-        let hi = Float(d)
-        return SIMD2<Float>(hi, Float(d - Double(hi)))
-    }
-
-    static func axisTable(count n: Int, shift: Double) -> [AxisEntry] {
-        (0..<n).map { i in
-            let c = Double(i) - shift
-            if c < 0 || c > Double(n - 1) {
-                return AxisEntry(i0: 0, i1: 0, valid: 0, pad: 0, w0: .zero, w1: .zero)
-            }
-            let i0 = Int(c.rounded(.down))
-            let t = c - Double(i0)
-            return AxisEntry(i0: Int32(i0), i1: Int32(min(i0 + 1, n - 1)), valid: 1, pad: 0,
-                             w0: split(1.0 - t), w1: split(t))
-        }
-    }
-
-    public func shift(_ frame: Volume, pad: Padding, dy: Double, dx: Double, mode: ShiftMode) throws -> Volume {
-        let H = frame.y + pad.top + pad.bottom, W = frame.x + pad.left + pad.right
-        let out = Volume(c: frame.c, z: frame.z, y: H, x: W, type: .uint16)
-        let src = try wrap(frame.storage)
-        let dst = try wrap(out.storage)
-        struct P {
-            var outW: UInt32; var outH: UInt32; var srcW: UInt32; var srcH: UInt32
-            var padTop: Int32; var padLeft: Int32; var iy: Int32; var ix: Int32; var planes: UInt32
-        }
-        var p = P(outW: UInt32(W), outH: UInt32(H), srcW: UInt32(frame.x), srcH: UInt32(frame.y),
-                  padTop: Int32(pad.top), padLeft: Int32(pad.left),
-                  iy: Int32(Shift.pyRound(dy)), ix: Int32(Shift.pyRound(dx)), planes: UInt32(frame.planeCount))
-        let kind = suffix(frame.type)
-        switch mode {
-        case .integer:
-            try run { enc in
-                enc.setBuffer(src, offset: 0, index: 0)
-                enc.setBuffer(dst, offset: 0, index: 1)
-                enc.setBytes(&p, length: MemoryLayout<P>.size, index: 4)
-                dispatch(enc, "shift_integer_\(kind)", width: W, height: H, depth: frame.planeCount)
-            }
-        case .subpixel:
-            let rows = MetalBackend.axisTable(count: H, shift: dy)
-            let cols = MetalBackend.axisTable(count: W, shift: dx)
-            let rb = try rows.withUnsafeBytes { r -> MTLBuffer in
-                guard let b = device.makeBuffer(bytes: r.baseAddress!, length: r.count, options: .storageModeShared) else { throw DCError("Metal: table") }
-                return b
-            }
-            let cb = try cols.withUnsafeBytes { r -> MTLBuffer in
-                guard let b = device.makeBuffer(bytes: r.baseAddress!, length: r.count, options: .storageModeShared) else { throw DCError("Metal: table") }
-                return b
-            }
-            try run { enc in
-                enc.setBuffer(src, offset: 0, index: 0)
-                enc.setBuffer(dst, offset: 0, index: 1)
-                enc.setBuffer(rb, offset: 0, index: 2)
-                enc.setBuffer(cb, offset: 0, index: 3)
-                enc.setBytes(&p, length: MemoryLayout<P>.size, index: 4)
-                dispatch(enc, "shift_bilinear_\(kind)", width: W, height: H, depth: frame.planeCount)
-            }
-        }
-        return out
     }
 
     /// Move every plane by a rotation and a shift on the GPU. The CPU works out where each output pixel reads the

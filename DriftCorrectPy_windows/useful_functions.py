@@ -126,23 +126,6 @@ def load_threshold_yaml(path):
         return yaml.safe_load(f)
 
 
-def resolve_tif_from_yaml(yaml_path, cfg):
-    """The source TIF of a threshold YAML: source.file when it is an existing TIF,
-    else `{P-id}*.ome.tif` next to the YAML. Returns (tif_path, base)."""
-    yaml_path = Path(yaml_path)
-    src = Path(cfg["source"]["file"])
-    if src.is_file() and src.suffix.lower() in (".tif", ".tiff"):
-        return src, stem_without_ome(src)
-    try:
-        p_id = "P" + yaml_path.stem.split("_P")[1].split("_")[0]
-    except IndexError as e:
-        raise ValueError(f"Could not derive embryo ID from {yaml_path.name} and source file not found.") from e
-    candidates = sorted(yaml_path.parent.glob(f"{p_id}*.ome.tif"))
-    if not candidates:
-        raise FileNotFoundError(f"no TIF found for {p_id} in {yaml_path.parent}")
-    return candidates[0], p_id
-
-
 # ── ND2 input ────────────────────────────────────────────────────────────────
 
 
@@ -333,9 +316,6 @@ class TiffStack:
     def read_frame(self, t):
         idx = [self.page_index(t, c, z) for c in range(self.C) for z in range(self.Z)]
         return self.read_pages(idx).reshape(self.C, self.Z, self.Y, self.X)
-
-    def read_channel(self, t, c):
-        return self.read_pages([self.page_index(t, c, z) for z in range(self.Z)])
 
     def close(self):
         if self._mapped_planes is not None:
@@ -655,13 +635,6 @@ def detect_embryo_xy(frame, params, backend=None):
 
 def shift_line(dy, dx):
     return f"dy={dy:+7.2f}  dx={dx:+7.2f}"
-
-
-def covering_pad(dys, dxs):
-    """(top, bottom, left, right) so that no shifted pixel leaves the canvas."""
-    dys, dxs = np.asarray(dys, dtype=np.float64), np.asarray(dxs, dtype=np.float64)
-    return (int(np.ceil(max(0, -dys.min()))), int(np.ceil(max(0, dys.max()))),
-            int(np.ceil(max(0, -dxs.min()))), int(np.ceil(max(0, dxs.max()))))
 
 
 # ── Display ──────────────────────────────────────────────────────────────────

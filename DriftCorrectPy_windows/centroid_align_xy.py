@@ -1,16 +1,12 @@
-"""centroid_align_xy.py aligns embryo movies in xy, with optional z correction.
+"""centroid_align_xy.py aligns an embryo movie in xy, with optional z correction.
 
-Reads a threshold YAML from the Mask tool (find_threshold.py) and writes one OME-TIFF and one aligned and one
-unaligned MP4 for each channel.
+It writes one OME-TIFF and one aligned and one unaligned MP4 for each channel.
 
-There are two xy methods. The centroid method shifts the centroid of the embryo mask to the frame centre at
-every timepoint. The image method matches the image of each timepoint with the timepoint before it, by shift and
-by rotation, and holds the body in place with the embryo mask. image_match.py describes it.
+The xy alignment matches the image of each timepoint with the timepoint before it, by shift and by rotation, and
+holds the body in place with the embryo mask. image_match.py describes it. The embryo mask comes from a threshold
+YAML file of the Mask tool (find_threshold.py), and every setting of that file is used.
 
 With --z_correct, z correction runs after the xy alignment and moves whole slices. z_drift.py describes it.
-
-Every YAML setting is used. This covers the method, invert, levels, selected classes, block size and the
-parameters of each timepoint.
 
 The alignment runs in two passes. Pass 1 measures every timepoint. Pass 2 pads the canvas so that no data is
 clipped and writes the output. --no_enlarge_canvas keeps the original canvas, so edge data may be clipped.
@@ -18,8 +14,8 @@ clipped and writes the output. --no_enlarge_canvas keeps the original canvas, so
 The GPU is used automatically when CUDA is available, and --cpu forces NumPy and SciPy.
 
 Usage:
-    python centroid_align_xy.py nd1181_P0_Venus_threshold.yaml
-    python centroid_align_xy.py nd1181_P0_Venus_threshold.yaml --xy_method image --xy_channel mCherry --z_correct --z_channel mCherry
+    python centroid_align_xy.py P0_concat.ome.tif --yaml P0_Venus_threshold.yaml
+    python centroid_align_xy.py P0_concat.ome.tif --yaml P0_Venus_threshold.yaml --xy_channel mCherry --z_correct --z_channel mCherry
 """
 
 import argparse
@@ -31,37 +27,29 @@ import numpy as np
 
 import image_match
 import z_drift
-from backend import SHIFT_MODES, get_backend
+from backend import get_backend
 from useful_functions import (
-    ChannelMovies, FrameSource, covering_pad, detect_embryo_xy, get_threshold_params_for_timepoint,
-    load_threshold_yaml, log, ome_metadata, ordered_map, physical_memory, pipeline_width, progress,
-    resolve_tif_from_yaml, save_ome_tiff, shift_line, stem_without_ome,
+    ChannelMovies, FrameSource, detect_embryo_xy, get_threshold_params_for_timepoint, load_threshold_yaml, log,
+    ome_metadata, ordered_map, physical_memory, pipeline_width, progress, save_ome_tiff, shift_line, stem_without_ome,
 )
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Align embryo movies in xy, with optional z correction.")
-    parser.add_argument("yaml_file", nargs="?", help="Threshold YAML from the Mask tool. It is needed when the run uses "
-                                                     "the embryo mask, and it names the movie when --input is not given.")
-    parser.add_argument("--input", help="The OME-TIFF or ND2 movie to align. Without it, the movie that the YAML file "
-                                        "names is used.")
-    parser.add_argument("--use_nd2", action="store_true", help="Load from the ND2 file instead of the per-embryo TIF.")
+    parser.add_argument("movie", help="The OME-TIFF or ND2 movie to align.")
+    parser.add_argument("--yaml", help="Threshold YAML from the Mask tool. It is needed to hold the body in place and "
+                                       "to follow the embryo mask.")
     parser.add_argument("--fps", type=float, default=2, help="Frames per second of the movies (default: 2)")
     parser.add_argument("--no_enlarge_canvas", action="store_true",
                         help="Keep the original canvas (edge data may be clipped).")
-    parser.add_argument("--shift_mode", choices=SHIFT_MODES, default=None,
-                        help="For the centroid method: subpixel (bilinear, default) or integer (whole pixels).")
-    parser.add_argument("--use_gpu", action="store_true",
-                        help="Kept for old scripts: same as --shift_mode integer. The GPU is used automatically.")
     parser.add_argument("--low_memory", action="store_true",
                         help="Do not keep frames in memory between the two passes.")
     parser.add_argument("--no_movies", action="store_true", help="Do not write MP4 movies.")
     parser.add_argument("--cpu", action="store_true", help="Use NumPy/SciPy even when CUDA is available.")
 
-    parser.add_argument("--xy_method", choices=("centroid", "image", "none"), default="centroid",
-                        help="centroid centres the centroid of the embryo mask (default). image matches the image of "
-                             "each timepoint with the timepoint before it. none leaves xy as it is, for z correction "
-                             "alone.")
+    parser.add_argument("--xy_method", choices=("image", "none"), default="image",
+                        help="image matches the image of each timepoint with the timepoint before it (default). none "
+                             "leaves xy as it is, for z correction alone.")
     parser.add_argument("--xy_channel", help="The channel that image matching compares, given as a name or as an index "
                                              "that starts at 0. A nuclear marker is the best choice. The default is the "
                                              "threshold channel of the YAML file.")
@@ -90,19 +78,15 @@ def parse_args(argv=None):
     parser.add_argument("--z_box", nargs=4, type=int, metavar=("X", "Y", "WIDTH", "HEIGHT"),
                         help="A box over cells that should stay in the same slice, in pixels of the first timepoint.")
     parser.add_argument("--z_drop_above", type=float,
-                        help="Leave out timepoints whose movement from the timepoint before them exceeds this many slices.")
+                        help="Leave out timepoints whose movement from the last kept timepoint exceeds this many slices.")
     parser.add_argument("--z_span", type=int, default=5,
                         help="Each timepoint is also compared with the one this many timepoints earlier, which catches "
                              "slow movement (default: 5). With 1 only neighbours are compared.")
     args = parser.parse_args(argv)
-    if args.shift_mode is None:
-        args.shift_mode = "integer" if args.use_gpu else "subpixel"
     if args.xy_no_rotation:
         args.xy_max_angle = 0.0
     if args.xy_smoothing < 0 or args.xy_max_angle < 0:
         parser.error("--xy_smoothing and --xy_max_angle must be 0 or positive")
-    if args.yaml_file is None and args.input is None:
-        parser.error("give a threshold YAML file or --input")
     if args.xy_method == "none" and not args.z_correct:
         parser.error("--xy_method none needs --z_correct")
     if args.z_span < 1:
@@ -149,36 +133,17 @@ def describe_follow(follow):
 def align(args):
     """Run the alignment. Returns (output TIFF paths, shifts[p][t] = (dy, dx))."""
     backend = get_backend(prefer_gpu=not args.cpu)
-    yaml_path = Path(args.yaml_file) if args.yaml_file else None
-    cfg = load_threshold_yaml(yaml_path) if yaml_path else None
+    cfg = load_threshold_yaml(Path(args.yaml)) if args.yaml else None
 
-    if args.input:
-        # The movie is given directly. An ND2 file can hold several embryos, and a TIFF file holds one.
-        src_path = Path(args.input)
-        if not src_path.is_file():
-            raise FileNotFoundError(f"File not found: {src_path}")
-        log(f"Loading {src_path.name} ...")
-        source = FrameSource(src_path)
-        base = src_path.stem if source.is_nd2 else stem_without_ome(src_path)
-        stem = base
-        log(f"  Shape: T={source.T}, P={source.P}, Z={source.Z}, C={source.C}, Y={source.Y}, X={source.X}")
-    elif args.use_nd2:
-        src_path = Path(cfg["source"]["file"])
-        if not src_path.is_file():
-            raise FileNotFoundError(f"ND2 file not found: {src_path}")
-        log(f"Loading {src_path} ...")
-        source = FrameSource(src_path)
-        base = src_path.stem
-        stem = base
-        log(f"  Shape: T={source.T}, P={source.P}, Z={source.Z}, C={source.C}, Y={source.Y}, X={source.X}")
-    else:
-        src_path, base = resolve_tif_from_yaml(yaml_path, cfg)
-        if src_path == Path(cfg["source"]["file"]):
-            log(f"Using source file from YAML: {src_path}")
-        log(f"Loading {src_path.name} ...")
-        source = FrameSource(src_path)
-        stem = stem_without_ome(src_path)
-        log(f"  Shape: T={source.T}, C={source.C}, Z={source.Z}, Y={source.Y}, X={source.X}")
+    # An ND2 file can hold several embryos, and a TIFF file holds one.
+    src_path = Path(args.movie)
+    if not src_path.is_file():
+        raise FileNotFoundError(f"File not found: {src_path}")
+    log(f"Loading {src_path.name} ...")
+    source = FrameSource(src_path)
+    base = src_path.stem if source.is_nd2 else stem_without_ome(src_path)
+    stem = base
+    log(f"  Shape: T={source.T}, P={source.P}, Z={source.Z}, C={source.C}, Y={source.Y}, X={source.X}")
     out_dir = src_path.parent / f"aligned_{base}"
     names = source.channel_names
     log(f"  Channels: {names}")
@@ -206,9 +171,8 @@ def align(args):
     xy_follow = follow_setting(args.xy_region, args.xy_box, "XY", X, Y) if image else "whole"
     z_channel = resolve_channel(args.z_channel, names, C, threshold_channel, "Z") if args.z_correct else 0
     z_follow = follow_setting(args.z_region, args.z_box, "Z", X, Y) if args.z_correct else "whole"
-    # The embryo mask is needed for the centroid, for holding the body, and for matching that follows the mask.
-    centroid_method = args.xy_method == "centroid"
-    needs_mask = centroid_method or hold or xy_follow == "mask" or z_follow == "mask"
+    # The embryo mask is needed to hold the body in place, and for matching that follows the mask.
+    needs_mask = hold or xy_follow == "mask" or z_follow == "mask"
     if needs_mask and cfg is None:
         raise ValueError("These settings need an embryo mask, and no threshold YAML file was given.")
     if image:
@@ -217,8 +181,6 @@ def align(args):
             else "      The body is not held in place.")
         # The matching runs on the GPU when the backend does.
         xp, nd = image_match.modules(backend.is_gpu)
-    elif centroid_method:
-        log(f"  XY: centroid of the embryo mask, shift: {args.shift_mode}")
     else:
         log("  XY: left as it is")
     if args.z_correct:
@@ -244,7 +206,8 @@ def align(args):
         return get_threshold_params_for_timepoint(cfg, t)
 
     shifts = [[] for _ in range(P)]
-    # With image matching, the step that moves each timepoint onto the one before it, and the pose of the body.
+    # With image matching, the step that moves each kept timepoint onto the kept one before it, and the pose of the
+    # body.
     steps = [[] for _ in range(P)]
     poses = [[] for _ in range(P)]
     trackers = []
@@ -259,22 +222,21 @@ def align(args):
             trackers.append(tracker)
             # The previous timepoint for image matching, with its mask.
             previous = None
-            position = (0.0, 0.0)
             # The transform that moves the current timepoint onto the first one, which is the sum of the steps.
             to_first = np.eye(3)
 
             def pass1(t, p=p, unaligned=unaligned):
                 frame = source.read_frame(t, p)
-                mask, centroid = detect_embryo_xy(frame, params_at(t), backend) if needs_mask else (None, None)
+                mask = detect_embryo_xy(frame, params_at(t), backend)[0] if needs_mask else None
                 projections = backend.max_project_all(frame) if unaligned or image else None
                 gray = ChannelMovies.gray_frames(projections) if unaligned else None
                 if cache is not None:
                     cache[(p, t)] = frame
-                return frame, mask, centroid, gray, projections[xy_channel] if image else None
+                return frame, mask, gray, projections[xy_channel] if image else None
 
             try:
-                for t, (frame, mask, centroid, gray, projection) in enumerate(ordered_map(pass1, T, width)):
-                    # The xy movement of this timepoint. `step` moves it onto the timepoint before it.
+                for t, (frame, mask, gray, projection) in enumerate(ordered_map(pass1, T, width)):
+                    # The xy movement of this timepoint. `step` moves it onto the last kept timepoint.
                     step = np.eye(3)
                     if image:
                         current = image_match.prepare(projection, xp)
@@ -282,35 +244,33 @@ def align(args):
                         if previous is not None:
                             compared = image_match.region(xy_follow, previous[1], to_first, X, Y)
                             step, cost = image_match.match(previous[0], current, compared, args.xy_max_angle, xp, nd)
-                        previous = (current, mask)
-                        steps[p].append(step)
-                        poses[p].append(image_match.pose(mask) if hold and mask is not None else None)
                         moved_x, moved_y = image_match.apply(step, mid_x, mid_y)
                         line = (shift_line(moved_y - mid_y, moved_x - mid_x) + f"  angle={image_match.angle_of(step):+6.2f}"
                                 + "  mismatch " + (f"{cost:.3f}" if np.isfinite(cost) else "--"))
                         if not cost <= image_match.WEAK_COST:
                             line += "  [weak match]"
-                    elif not centroid_method:
-                        shifts[p].append((0.0, 0.0))
-                        line = ""
                     else:
-                        # The centroid alignment moves each timepoint by whole pixels for the z comparison.
-                        now = (Y / 2 - centroid[0], X / 2 - centroid[1])
-                        if t > 0:
-                            step = image_match.shift(round(now[1]) - round(position[1]), round(now[0]) - round(position[0]))
-                        position = now
-                        shifts[p].append(position)
-                        line = shift_line(*position)
-                    to_first = to_first @ step
+                        line = ""
+                    on_first = to_first @ step
                     # Z correction compares each timepoint with earlier ones after moving it onto them in xy.
+                    keep = True
                     if tracker:
-                        followed = image_match.region(z_follow, mask, to_first, X, Y)
+                        followed = image_match.region(z_follow, mask, on_first, X, Y)
                         measured = tracker.add(lambda m, f=frame, r=followed: z_drift.describe(f, z_channel, r, m), step)
                         line += ("   " if line else "") + z_drift.line(measured)
-                    log(line)
-                    keep = tracker is None or t == 0 or args.z_drop_above is None or abs(tracker.steps[t].dz) <= args.z_drop_above
-                    if unaligned and keep:
-                        unaligned.append(gray)
+                        keep = tracker.kept[-1] == t
+                    log(line if keep else line + "  [dropped]")
+                    # A dropped timepoint is not stored, so the next timepoint is matched to the last kept one.
+                    if keep:
+                        to_first = on_first
+                        if image:
+                            previous = (current, mask)
+                            steps[p].append(step)
+                            poses[p].append(image_match.pose(mask) if hold and mask is not None else None)
+                        else:
+                            shifts[p].append((0.0, 0.0))
+                        if unaligned:
+                            unaligned.append(gray)
                     progress(f"Pass 1: shifts (embryo {p})", t + 1, T)
                 if unaligned:
                     unaligned.close()
@@ -342,8 +302,6 @@ def align(args):
             log(f"  angle  min={min(angles):+.1f}  max={max(angles):+.1f} degrees")
             if not args.no_enlarge_canvas:
                 pad = image_match.covering_pad([m for row in transforms for m in row], X, Y)
-        elif centroid_method and not args.no_enlarge_canvas:
-            pad = covering_pad(dys, dxs)
         log(f"\nCanvas padding:  top={pad[0]}  bottom={pad[1]}  left={pad[2]}  right={pad[3]}")
         H, W = Y + pad[0] + pad[1], X + pad[2] + pad[3]
         log(f"  Expanded canvas: Y={H}  X={W}")
@@ -370,14 +328,12 @@ def align(args):
             def pass2(index, p=p, aligned=aligned, correction=correction, kept=kept):
                 t = int(kept[index])
                 frame = cache.pop((p, t)) if cache is not None and (p, t) in cache else source.read_frame(t, p)
+                # The xy shifts and transforms hold the kept timepoints only.
                 if image:
-                    out = backend.warp(frame, pad, transforms[p][t])
-                elif not centroid_method:
+                    out = backend.warp(frame, pad, transforms[p][index])
+                else:
                     # Without an xy correction the pixel values and the sample type stay as they are.
                     out = np.asarray(frame)
-                else:
-                    dy, dx = shifts[p][t]
-                    out = backend.shift(frame, pad, dy, dx, args.shift_mode)
                 gray = ChannelMovies.gray_frames(backend.max_project_all(out)) if aligned else None
                 # Move whole slices and leave the gaps empty. The movie frames are made before this step because a
                 # maximum projection along z does not change.
@@ -400,7 +356,7 @@ def align(args):
                 metadata["Plane"] = {"DeltaT": times, "DeltaTUnit": ["s"] * len(times)}
             try:
                 save_ome_tiff(path, frames(), names, source.vox, source.period_s, shape=(len(kept), C, depth, H, W),
-                              dtype=np.uint16 if image or centroid_method else source.dtype, metadata=metadata,
+                              dtype=np.uint16 if image else source.dtype, metadata=metadata,
                               bigtiff=True if args.low_memory else None)
                 if aligned:
                     aligned.close()

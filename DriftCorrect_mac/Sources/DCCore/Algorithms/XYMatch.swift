@@ -1,7 +1,6 @@
 import Foundation
 
-/// Settings of the xy alignment by image matching. When `AlignOptions.xyMatching` is nil, the alignment centres the
-/// centroid of the embryo mask instead.
+/// Settings of the xy alignment by image matching.
 public struct XYMatchOptions: Sendable {
     /// The channel to compare, given by index or by name. When both are nil, the threshold channel of the YAML file
     /// is used. A nuclear marker is the best choice because its pattern stays the same between timepoints.

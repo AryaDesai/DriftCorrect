@@ -30,7 +30,6 @@ struct AlignView: View {
     @State private var showAdvanced = false
 
     // Advanced options for xy
-    @State private var centroidMethod = false
     @State private var xyFollow: Follow = .whole
     @State private var xyBox: CGRect?
     @State private var hold = true
@@ -52,9 +51,9 @@ struct AlignView: View {
 
     private var doesXY: Bool { mode != .z }
     private var doesZ: Bool { mode != .xy }
-    /// The embryo mask is needed for the centroid method, for holding the body, and for following the mask.
+    /// The embryo mask is needed for holding the body and for following the mask.
     private var needsMask: Bool {
-        (doesXY && (centroidMethod || hold || xyFollow == .mask)) || (doesZ && zFollow == .mask)
+        (doesXY && (hold || xyFollow == .mask)) || (doesZ && zFollow == .mask)
     }
     private var hasMovie: Bool { !moviePath.trimmingCharacters(in: .whitespaces).isEmpty }
     private var hasMask: Bool { !yamlPath.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -112,7 +111,6 @@ struct AlignView: View {
     // The explanation of each setting. It is shown when the pointer rests on the setting.
     static let channelHelp = "The matching follows the pattern of this channel. A nuclear marker works best because its pattern stays the same between timepoints."
     static let maskHelp = "These settings need the embryo mask. Make mask opens the threshold window on this movie and starts from a threshold estimated from the image. Saving there writes a YAML file next to the movie, and this field then points to it. An existing threshold YAML file can also be selected."
-    static let methodHelp = "Image matching compares each timepoint with the one before it and finds the shift and the turn at which the two images differ least. Mask centroid moves the centroid of the embryo mask to the centre of the frame and does not turn the image."
     static let xyFollowHelp = "The pixels that the matching compares. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
     static let holdHelp = "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the centroid of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints."
     static let smoothingHelp = "The centroid of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back."
@@ -120,7 +118,7 @@ struct AlignView: View {
     static let angleHelp = "The matching tries turns up to this angle between two neighbouring timepoints."
     static let zFollowHelp = "The pixels whose pattern must stay in the same slice. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
     static let spanHelp = "Each timepoint is compared with the one before it and with the one this many timepoints earlier. A slow movement is too small to measure between neighbours and adds up to a measurable amount over several timepoints. With 1 only neighbours are compared."
-    static let dropHelp = "Timepoints whose z movement from the previous timepoint exceeds the maximum are left out of the output. Later timepoints are still corrected for that movement."
+    static let dropHelp = "Timepoints whose z movement from the last kept timepoint exceeds the maximum are left out of the output. The other timepoints are aligned as if the dropped ones were never recorded. When the tissue stays at the new depth, only the first timepoint after the move is dropped."
     static let enlargeHelp = "Adds empty pixels around the frame and empty slices to the stack so that data moved by the correction stays in the file. Without it the file keeps its size and data that moves outside is lost."
     static let fpsHelp = "The playback speed of the MP4 movies written next to the corrected file."
     static let lowMemoryHelp = "Reads the movie from disk again when writing the output. Without it the frames are kept in memory between the two passes, which is faster and needs enough memory for the whole movie."
@@ -155,25 +153,18 @@ struct AlignView: View {
     private var advanced: some View {
         if doesXY {
             Section("XY") {
-                Picker("Method:", selection: $centroidMethod) {
-                    Text("Image matching").tag(false)
-                    Text("Mask centroid").tag(true)
+                followPicker(selection: $xyFollow, target: .xy, box: xyBox, help: Self.xyFollowHelp)
+                Toggle("Hold the body in place with the embryo mask", isOn: $hold).toggleStyle(.checkbox)
+                    .help(Self.holdHelp)
+                if hold {
+                    LabeledContent("Averaging (timepoints):") { TextField("", value: $smoothing, format: .number).frame(width: 80) }
+                        .help(Self.smoothingHelp)
                 }
-                .help(Self.methodHelp)
-                if !centroidMethod {
-                    followPicker(selection: $xyFollow, target: .xy, box: xyBox, help: Self.xyFollowHelp)
-                    Toggle("Hold the body in place with the embryo mask", isOn: $hold).toggleStyle(.checkbox)
-                        .help(Self.holdHelp)
-                    if hold {
-                        LabeledContent("Averaging (timepoints):") { TextField("", value: $smoothing, format: .number).frame(width: 80) }
-                            .help(Self.smoothingHelp)
-                    }
-                    Toggle("Correct rotation", isOn: $correctRotation).toggleStyle(.checkbox)
-                        .help(Self.rotationHelp)
-                    if correctRotation {
-                        LabeledContent("Largest turn (degrees):") { TextField("", value: $maximumAngle, format: .number).frame(width: 80) }
-                            .help(Self.angleHelp)
-                    }
+                Toggle("Correct rotation", isOn: $correctRotation).toggleStyle(.checkbox)
+                    .help(Self.rotationHelp)
+                if correctRotation {
+                    LabeledContent("Largest turn (degrees):") { TextField("", value: $maximumAngle, format: .number).frame(width: 80) }
+                        .help(Self.angleHelp)
                 }
             }
         }
@@ -328,18 +319,14 @@ struct AlignView: View {
         o.fps = fps
         o.enlargeCanvas = enlargeCanvas
         o.lowMemory = lowMemory
-        if !centroidMethod {
-            var m = XYMatchOptions()
-            if !channels.isEmpty { m.channelIndex = channel }
-            guard let r = region(xyFollow, box: xyBox) else {
-                showAlert("No box", "Draw a box over the cells to follow in xy, or choose another option."); return
-            }
-            m.region = r
-            m.holdInPlace = hold
-            m.smoothing = smoothing
-            m.maximumAngle = correctRotation ? maximumAngle : 0
-            o.xyMatching = m
+        if !channels.isEmpty { o.xyMatching.channelIndex = channel }
+        guard let r = region(xyFollow, box: xyBox) else {
+            showAlert("No box", "Draw a box over the cells to follow in xy, or choose another option."); return
         }
+        o.xyMatching.region = r
+        o.xyMatching.holdInPlace = hold
+        o.xyMatching.smoothing = smoothing
+        o.xyMatching.maximumAngle = correctRotation ? maximumAngle : 0
         if doesZ { o.zCorrection = z }
         let options = o
         job.append("Running alignment: \(movie.path)\n")

@@ -118,19 +118,6 @@ final class ParityTests: XCTestCase {
         }
     }
 
-    func testShiftBitExact() {
-        for c in Ref.cases("shift") {
-            let frame = Ref.volume(c["frame"])
-            let pad = (c["pad"] as! [NSNumber]).map { $0.intValue }
-            let padding = Padding(top: pad[0], bottom: pad[1], left: pad[2], right: pad[3])
-            let dy = Ref.num(c["dy"]), dx = Ref.num(c["dx"])
-            let sub = Shift.apply(frame, pad: padding, dy: dy, dx: dx, mode: .subpixel)
-            XCTAssertEqual(Ref.uint16s(sub), Ref.load(c["subpixel"], as: UInt16.self), "subpixel \(dy) \(dx)")
-            let whole = Shift.apply(frame, pad: padding, dy: dy, dx: dx, mode: .integer)
-            XCTAssertEqual(Ref.uint16s(whole), Ref.load(c["integer"], as: UInt16.self), "integer \(dy) \(dx)")
-        }
-    }
-
     func testAutoContrast() {
         for c in Ref.cases("auto_contrast") {
             XCTAssertEqual(Contrast.autoContrast(Ref.floats(c["input"])), Ref.load(c["expected"], as: UInt8.self))

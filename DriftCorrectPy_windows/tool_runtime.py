@@ -11,11 +11,3 @@ def tool_command(mode, arguments=()):
         "-u", str(Path(__file__).resolve().with_name("drift_correct.py"))
     ]
     return sys.executable, [*prefix, "--tool", mode, *arguments]
-
-
-def configure_worker_output():
-    # A compiled executable does not accept Python's -u switch. Configure its
-    # streams directly so QProcess receives live logs, including tqdm output.
-    for stream in (sys.stdout, sys.stderr):
-        if stream is not None and hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True, write_through=True)

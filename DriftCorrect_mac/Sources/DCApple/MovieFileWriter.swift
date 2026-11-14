@@ -6,13 +6,12 @@ import Foundation
 import VideoToolbox
 import DCCore
 
-/// An HEVC movie writer on the media engine of Apple, which replaces the bundled FFmpeg.
+/// This writer encodes gray frames with Apple VideoToolbox and saves them as HEVC or H.264 in an MP4 file.
 ///
-/// It matches `ffmpeg_runtime.encode_rgb_mp4` with the VideoToolbox encoder. The quality is 0.65, which is
-/// `-q:v 65`, the chroma format is 4:2:0, the tag is `hvc1`, and fast start is on. Frames are padded with
-/// black to an even width and height. The file is written under a temporary name and moved into place only
-/// after a successful finish.
-public final class HEVCMovieWriter: MovieWriter {
+/// The quality runs from 1 to 100, and 65 is the default. VideoToolbox takes it as a fraction from 0 to 1. The chroma format is 4:2:0 and fast start is on. Frames
+/// are padded with black to an even width and height. The file is written under a temporary name and moved into
+/// place only after a successful finish.
+public final class MovieFileWriter: MovieWriter {
     public let url: URL
     let width: Int, height: Int
     let encodedWidth: Int, encodedHeight: Int
@@ -27,8 +26,9 @@ public final class HEVCMovieWriter: MovieWriter {
     private var frameIndex: Int64 = 0
     private var finished = false
 
-    public init(url: URL, width: Int, height: Int, fps: Double, quality: Double = 0.65) throws {
+    public init(url: URL, width: Int, height: Int, fps: Double, codec: MovieCodec = .hevc, quality: Double = 65) throws {
         guard fps.isFinite && fps > 0 else { throw DCError("FPS must be a finite positive number") }
+        guard quality.isFinite && quality >= 1 && quality <= 100 else { throw DCError("The quality must be between 1 and 100") }
         self.url = url
         self.width = width
         self.height = height
@@ -46,16 +46,20 @@ public final class HEVCMovieWriter: MovieWriter {
         ]
         var s: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(encodedWidth), height: Int32(encodedHeight),
-                                                codecType: kCMVideoCodecType_HEVC,
+                                                codecType: codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
                                                 encoderSpecification: spec as CFDictionary,
                                                 imageBufferAttributes: attrs as CFDictionary,
                                                 compressedDataAllocator: nil, outputCallback: nil, refcon: nil,
                                                 compressionSessionOut: &s)
-        guard status == noErr, let session = s else { throw DCError("No working HEVC encoder (VideoToolbox status \(status))") }
+        guard status == noErr, let session = s else {
+            throw DCError("No working \(codec == .hevc ? "HEVC" : "H.264") encoder (VideoToolbox status \(status))")
+        }
         self.session = session
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: quality))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
+        // The quality and the profile depend on the codec. The automatic level lets the encoder pick it from the frame size.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: quality / 100))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -113,7 +117,7 @@ public final class HEVCMovieWriter: MovieWriter {
             if let sample = sample { self.pending.append(sample) }
             self.lock.unlock()
         }
-        guard status == noErr else { throw DCError("HEVC encode failed (status \(status))") }
+        guard status == noErr else { throw DCError("Video encode failed (status \(status))") }
         try drain(waitForAll: false)
     }
 
@@ -124,7 +128,7 @@ public final class HEVCMovieWriter: MovieWriter {
         pending.removeAll()
         let err = encodeError
         lock.unlock()
-        if err != noErr { throw DCError("HEVC encode failed (status \(err))") }
+        if err != noErr { throw DCError("Video encode failed (status \(err))") }
         for sample in samples {
             if writer == nil { try startWriter(format: CMSampleBufferGetFormatDescription(sample)) }
             guard let input = input, let writer = writer else { continue }
@@ -144,7 +148,7 @@ public final class HEVCMovieWriter: MovieWriter {
         w.shouldOptimizeForNetworkUse = true  // This is `-movflags +faststart` in FFmpeg.
         let i = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: format)
         i.expectsMediaDataInRealTime = false
-        guard w.canAdd(i) else { throw DCError("Cannot add the HEVC track to the MP4 file") }
+        guard w.canAdd(i) else { throw DCError("Cannot add the video track to the MP4 file") }
         w.add(i)
         guard w.startWriting() else { throw DCError("Cannot write \(url.lastPathComponent): \(w.error?.localizedDescription ?? "")") }
         w.startSession(atSourceTime: .zero)
@@ -188,10 +192,13 @@ public final class HEVCMovieWriter: MovieWriter {
     }
 }
 
-public struct HEVCMovieFactory: MovieWriterFactory {
-    public init() {}
+/// The factory makes one writer for each movie, all with the same codec and quality.
+public struct MovieFileFactory: MovieWriterFactory {
+    public var codec: MovieCodec
+    public var quality: Double
+    public init(codec: MovieCodec = .hevc, quality: Double = 65) { self.codec = codec; self.quality = quality }
     public func makeWriter(url: URL, width: Int, height: Int, fps: Double) throws -> MovieWriter {
-        try HEVCMovieWriter(url: url, width: width, height: height, fps: fps)
+        try MovieFileWriter(url: url, width: width, height: height, fps: fps, codec: codec, quality: quality)
     }
 }
 #endif
