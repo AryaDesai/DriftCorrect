@@ -159,11 +159,12 @@ def test_image_matching_with_z_correction(tmp_path):
             assert compared > 10_000 and difference < 0.02
 
 
-def test_image_matching_holds_the_body(tmp_path):
+@pytest.mark.parametrize("metric", ["centroid", "median"])
+def test_image_matching_holds_the_body(tmp_path, metric):
     # The scene and its mask move together, so holding the body must put the scene in the same place at every
     # timepoint.
     moves = [(0, 0), (4, -3), (9, 2), (-12, 15), (-10, 14), (3, 3)]
-    out, _ = run(write_movie(tmp_path, [0] * 6, moves))
+    out, _ = run(write_movie(tmp_path, [0] * 6, moves), "--xy_mask_metric", metric)
     first = out[0, 0, 6].astype(float)
     for t in range(1, len(moves)):
         plane = out[t, 0, 6].astype(float)
@@ -205,3 +206,15 @@ def test_drop_compares_with_the_last_kept_timepoint(tmp_path):
                  "--z_drop_above", "2")
     assert out.shape[0] == 4
 
+
+@pytest.mark.parametrize("points, expected", [
+    ([(0, 0), (0, 1), (0, 2), (1, 1), (4, 8)], (1.0, 0.0)),
+    ([(0, 0), (1, 1), (2, 4), (4, 8)], (2.5, 1.5)),
+])
+def test_mask_metric(points, expected):
+    mask = np.zeros((5, 9), dtype=bool)
+    for y, x in points:
+        mask[y, x] = True
+    assert image_match.pose(mask, "median") == expected
+    assert np.allclose(image_match.pose(mask), np.array(points).mean(axis=0)[::-1])
+    assert image_match.pose(np.zeros_like(mask), "median") is None

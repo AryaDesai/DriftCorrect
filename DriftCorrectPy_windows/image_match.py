@@ -315,10 +315,16 @@ def region(follow, mask, to_first, width, height):
 # the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 
 
-def pose(mask):
-    """Return the centroid (x, y) of a mask, or None when the mask is empty."""
+def pose(mask, metric="centroid"):
+    """Return the mask center (x, y), or None when the mask is empty.
+
+    Median uses the median of each coordinate independently.
+    """
+    if metric not in ("centroid", "median"):
+        raise ValueError(f"Unknown mask metric: {metric}")
     ys, xs = np.nonzero(mask)
-    return (xs.mean(), ys.mean()) if len(xs) else None
+    center = np.mean if metric == "centroid" else np.median
+    return (center(xs), center(ys)) if len(xs) else None
 
 
 def smooth(values, sigma):

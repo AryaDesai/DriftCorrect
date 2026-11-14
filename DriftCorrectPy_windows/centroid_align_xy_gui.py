@@ -29,8 +29,9 @@ HELP = {
     "channel": "The matching follows the pattern of this channel. A nuclear marker works best because its pattern stays the same between timepoints.",
     "mask": "These settings need the embryo mask. Make mask opens the threshold window on this movie and starts from a threshold estimated from the image. Saving there writes a YAML file next to the movie, and this field then points to it. An existing threshold YAML file can also be selected.",
     "xy_follow": "The pixels that the matching compares. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside the box, which is given as x, y, width, height in pixels of the first timepoint.",
-    "hold": "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the centroid of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints.",
-    "smoothing": "The centroid of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back.",
+    "hold": "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the selected center of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints.",
+    "mask_metric": "Centroid uses the mean X and Y coordinates of the mask pixels. Median uses the median of each coordinate, reducing the influence of small areas far from the body.",
+    "smoothing": "The selected center of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back.",
     "rotation": "Image matching also tries small turns between neighbouring timepoints and removes the sudden ones. With this off the matching only shifts, and the image is never turned.",
     "angle": "The matching tries turns up to this angle between two neighbouring timepoints.",
     "z_follow": "The pixels whose pattern must stay in the same slice. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside the box, which is given as x, y, width, height in pixels of the first timepoint.",
@@ -186,6 +187,10 @@ class AlignWindow(QMainWindow):
         self.hold_check.setChecked(True)
         self.hold_check.toggled.connect(self._update_visible)
         self._advanced_row("xy", "", self.hold_check, HELP["hold"])
+        self.mask_metric_combo = QComboBox()
+        self.mask_metric_combo.addItem("Centroid", "centroid")
+        self.mask_metric_combo.addItem("Median", "median")
+        self._advanced_row("hold", "Mask metric:", self.mask_metric_combo, HELP["mask_metric"])
         self.smoothing_spin = QDoubleSpinBox()
         self.smoothing_spin.setRange(0, 1000)
         self.smoothing_spin.setDecimals(1)
@@ -362,7 +367,8 @@ class AlignWindow(QMainWindow):
             if not self.does_xy():
                 args += ["--xy_method", "none"]
             else:
-                args += [*self.xy_follow.arguments("xy"), "--xy_smoothing", str(self.smoothing_spin.value()),
+                args += [*self.xy_follow.arguments("xy"), "--xy_mask_metric", self.mask_metric_combo.currentData(),
+                         "--xy_smoothing", str(self.smoothing_spin.value()),
                          "--xy_max_angle", str(self.angle_spin.value() if self.rotation_check.isChecked() else 0)]
                 if channel:
                     args += ["--xy_channel", channel]

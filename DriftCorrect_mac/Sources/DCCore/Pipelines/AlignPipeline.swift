@@ -139,7 +139,7 @@ public final class AlignPipeline {
             throw DCError("These settings need an embryo mask, and no threshold YAML file was given.")
         }
         ctx.log("  XY: image matching of \(name(xyChannel)) (index \(xyChannel)), following \(describe(xy.region))")
-        ctx.log(xy.holdInPlace ? "      The centroid of the embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
+        ctx.log(xy.holdInPlace ? "      The \(xy.maskMetric.rawValue) of the embryo mask holds the body in place, averaged over \(PyFormat.g(xy.smoothing)) timepoints."
                                : "      The body is not held in place.")
         let midX = Double(src.x - 1) / 2, midY = Double(src.y - 1) / 2
         if let z = zopt { ctx.log("  Z correction: \(name(zChannel)) (index \(zChannel)), following \(describe(z.region))") }
@@ -182,17 +182,17 @@ public final class AlignPipeline {
                     return Item(frame: frame, detection: detection, gray: gray, xy: xy)
                 }, consume: { t, item in
                     // The xy movement of this timepoint. `step` moves it onto the last kept timepoint.
-                    var step = Rigid.identity, cost = 0.0
+                    var step = Rigid.identity, cost = 0.0, weak = false
                     if let prev = previous {
                         let region = XYMatch.region(xy.region, mask: prev.mask, toFirst: toFirst,
                                                     width: item.xy.width, height: item.xy.height)
                         let m = XYMatch.match(prev.frame, item.xy, region: region, maximumAngle: xy.maximumAngle)
-                        step = m.step; cost = m.cost
+                        step = m.step; cost = m.cost; weak = m.weak
                     }
                     let moved = step.apply(x: midX, y: midY)
                     var line = Masking.shiftLine(moved.y - midY, moved.x - midX) + PyFormat.fmt("  angle=%+6.2f", step.degrees)
                         + "  mismatch " + (cost.isFinite ? PyFormat.fmt("%.3f", cost) : "--")
-                    if !(cost <= ZDrift.weakCost) { line += "  [weak match]" }
+                    if weak { line += "  [weak match]" }
                     let onFirst = toFirst.after(step)
                     // Z correction compares each timepoint with earlier ones after moving it onto them in xy.
                     var keep = true
@@ -210,7 +210,7 @@ public final class AlignPipeline {
                         toFirst = onFirst
                         previous = (item.xy, item.detection?.mask)
                         steps[p].append(step)
-                        poses[p].append(xy.holdInPlace ? item.detection?.mask.flatMap { Anchor.pose(of: $0) } : nil)
+                        poses[p].append(xy.holdInPlace ? item.detection?.mask.flatMap { Anchor.pose(of: $0, metric: xy.maskMetric) } : nil)
                         try unaligned?.append(item.gray)
                     }
                     ctx.progress("Pass 1: shifts (embryo \(p))", t + 1, T)

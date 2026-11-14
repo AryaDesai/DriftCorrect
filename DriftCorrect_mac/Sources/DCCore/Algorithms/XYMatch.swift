@@ -1,5 +1,10 @@
 import Foundation
 
+/// How the embryo mask center is measured for holding the body in place.
+public enum MaskMetric: String, CaseIterable, Sendable {
+    case centroid, median
+}
+
 /// Settings of the xy alignment by image matching.
 public struct XYMatchOptions: Sendable {
     /// The channel to compare, given by index or by name. When both are nil, the threshold channel of the YAML file
@@ -10,6 +15,7 @@ public struct XYMatchOptions: Sendable {
     /// Hold the body in place with the embryo mask, as `Anchor` describes. Without it the frame can slowly travel
     /// when the cells move through the body.
     public var holdInPlace = true
+    public var maskMetric: MaskMetric = .centroid
     /// The number of timepoints over which the position of the body and the turn are averaged.
     public var smoothing = 10.0
     /// The largest turn between two neighbouring timepoints that the matching looks for, in degrees. With 0 the
@@ -164,21 +170,28 @@ public enum XYMatch {
         return XYFrame.Level(bin: l.bin, w: w, h: h, pixels: pixels, valid: valid)
     }
 
-    /// Try every whole offset within (ry, rx) of (cy, cx) and return the one with the smallest mismatch.
+    /// Try every whole offset within (ry, rx) of (cy, cx) and return the one with the smallest mismatch. When
+    /// `tried` is given, the mismatch of every offset is added to it.
     static func search(_ la: XYFrame.Level, _ lb: XYFrame.Level, region: [Bool], regionCount: Int,
-                       cy: Int, cx: Int, ry: Int, rx: Int) -> (dy: Int, dx: Int, cost: Double) {
+                       cy: Int, cx: Int, ry: Int, rx: Int, tried: UnsafeMutablePointer<[Double]>? = nil) -> (dy: Int, dx: Int, cost: Double) {
         let rows = Array((cy - ry)...(cy + ry))
         var rowBest = [(dy: Int, dx: Int, cost: Double)](repeating: (0, 0, .infinity), count: rows.count)
+        // Each row keeps its own list of costs, because the rows run at the same time.
+        var rowCosts = [[Double]](repeating: [], count: rows.count)
         rowBest.withUnsafeMutableBufferPointer { out in
-            Parallel.forEach(rows.count) { k in
-                var m = (dy: rows[k], dx: 0, cost: Double.infinity)
-                for dx in (cx - rx)...(cx + rx) {
-                    let c = cost(la, lb, region: region, regionCount: regionCount, dy: rows[k], dx: dx)
-                    if c < m.cost { m = (rows[k], dx, c) }
+            rowCosts.withUnsafeMutableBufferPointer { costs in
+                Parallel.forEach(rows.count) { k in
+                    var m = (dy: rows[k], dx: 0, cost: Double.infinity)
+                    for dx in (cx - rx)...(cx + rx) {
+                        let c = cost(la, lb, region: region, regionCount: regionCount, dy: rows[k], dx: dx)
+                        if c < m.cost { m = (rows[k], dx, c) }
+                        if tried != nil { costs[k].append(c) }
+                    }
+                    out[k] = m
                 }
-                out[k] = m
             }
         }
+        tried?.pointee += rowCosts.flatMap { $0 }
         var best = (dy: 0, dx: 0, cost: Double.infinity)
         for m in rowBest where m.cost < best.cost { best = m }
         return best
@@ -206,11 +219,13 @@ public enum XYMatch {
     /// places both between those steps, which makes the result finer than the steps of the search. `dc accuracy`
     /// measures the error that remains on a real movie. `region` is in
     /// pixels of `a` at full resolution, and without it the whole frame is used. Angles up to `maximumAngle` degrees
-    /// in either direction are tried. With 0 the match only shifts.
-    public static func match(_ a: XYFrame, _ b: XYFrame, region: [Bool]? = nil, maximumAngle: Double = 0) -> (step: Rigid, cost: Double) {
+    /// in either direction are tried. With 0 the match only shifts. `weak` says that the match is not to be trusted,
+    /// as `ZDrift.isWeak` describes. It is judged on the coarsest copy, where the search covers half the frame.
+    public static func match(_ a: XYFrame, _ b: XYFrame, region: [Bool]? = nil, maximumAngle: Double = 0) -> (step: Rigid, cost: Double, weak: Bool) {
         let W = a.width, H = a.height
         let whole = region ?? [Bool](repeating: true, count: W * H)
         var best = (dy: 0, dx: 0, cost: Double.infinity)
+        var weak = true
         var angle = 0.0, step = angleStep
         var previousBin = 0
         // This holds the part of the shift that lies between whole pixels, measured on the finest copy.
@@ -223,8 +238,9 @@ public enum XYMatch {
             if previousBin == 0 {
                 // The coarsest copy first searches half the frame in each direction without turning, so that a
                 // large jump is found. It then tries every candidate angle close to that offset.
-                best = search(la, lb, region: r, regionCount: count, cy: 0, cx: 0, ry: la.h / 2, rx: la.w / 2)
-                if !best.cost.isFinite { return (.identity, .nan) }
+                var tried: [Double] = []
+                best = search(la, lb, region: r, regionCount: count, cy: 0, cx: 0, ry: la.h / 2, rx: la.w / 2, tried: &tried)
+                if !best.cost.isFinite { return (.identity, .nan, true) }
                 let straight = best
                 var turn = (dy: 0, dx: 0, cost: Double.infinity), turnAngle = 0.0
                 var candidate = -maximumAngle
@@ -236,6 +252,7 @@ public enum XYMatch {
                     candidate += step
                 }
                 if turn.cost < straight.cost * (1 - turnMargin) { best = turn; angle = turnAngle }
+                weak = ZDrift.isWeak(best: best.cost, tried: tried)
             } else {
                 // Each finer copy searches around the result of the copy before it, far enough to cover its
                 // rounding. It tries no turn, and the angle found so far with half a step to either side.
@@ -253,7 +270,7 @@ public enum XYMatch {
                 } else if straight.cost.isFinite {
                     best = straight; angle = 0
                 } else {
-                    return (.identity, .nan)
+                    return (.identity, .nan, true)
                 }
             }
             previousBin = la.bin
@@ -280,7 +297,7 @@ public enum XYMatch {
             fraction = (between(beside(-1, 0), best.cost, beside(1, 0)), between(beside(0, -1), best.cost, beside(0, 1)))
         }
         let turn = Rigid.rotation(degrees: angle, aboutX: Double(W - 1) / 2, y: Double(H - 1) / 2)
-        return (Rigid.shift(dx: Double(best.dx) + fraction.dx, dy: Double(best.dy) + fraction.dy).after(turn), best.cost)
+        return (Rigid.shift(dx: Double(best.dx) + fraction.dx, dy: Double(best.dy) + fraction.dy).after(turn), best.cost, weak)
     }
 
     /// Return the pixels of one timepoint that the matching compares, or nil for the whole frame. `mask` is the

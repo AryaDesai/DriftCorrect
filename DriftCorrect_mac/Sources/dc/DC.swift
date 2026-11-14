@@ -134,6 +134,10 @@ struct XYOptionGroup: ParsableArguments {
             help: "The number of timepoints over which the position of the body and the turn are averaged (default 10).")
     var xySmoothing: Double?
 
+    @Option(name: [.customLong("xy-mask-metric"), .customLong("xy_mask_metric")],
+            help: "The mask center used to hold the body in place: centroid or median (default centroid).")
+    var xyMaskMetric = "centroid"
+
     @Option(name: [.customLong("xy-max-angle"), .customLong("xy_max_angle")],
             help: "The largest turn between two neighbouring timepoints that image matching looks for, in degrees (default 3). With 0 the matching only shifts.")
     var xyMaxAngle: Double?
@@ -147,6 +151,10 @@ struct XYOptionGroup: ParsableArguments {
         (o.channelIndex, o.channelName) = parseChannel(xyChannel)
         o.region = try parseRegion(xyRegion, box: xyBox, prefix: "xy", default: .wholeFrame)
         o.holdInPlace = !xyNoHold
+        guard let metric = MaskMetric(rawValue: xyMaskMetric) else {
+            throw ValidationError("--xy-mask-metric must be centroid or median")
+        }
+        o.maskMetric = metric
         if let v = xySmoothing {
             guard v.isFinite, v >= 0 else { throw ValidationError("--xy-smoothing must be 0 or a positive number of timepoints") }
             o.smoothing = v

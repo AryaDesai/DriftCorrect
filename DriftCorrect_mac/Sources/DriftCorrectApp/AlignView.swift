@@ -33,6 +33,7 @@ struct AlignView: View {
     @State private var xyFollow: Follow = .whole
     @State private var xyBox: CGRect?
     @State private var hold = true
+    @State private var maskMetric: MaskMetric = .centroid
     @State private var smoothing = 10.0
     @State private var correctRotation = true
     @State private var maximumAngle = 3.0
@@ -112,8 +113,8 @@ struct AlignView: View {
     static let channelHelp = "The matching follows the pattern of this channel. A nuclear marker works best because its pattern stays the same between timepoints."
     static let maskHelp = "These settings need the embryo mask. Make mask opens the threshold window on this movie and starts from a threshold estimated from the image. Saving there writes a YAML file next to the movie, and this field then points to it. An existing threshold YAML file can also be selected."
     static let xyFollowHelp = "The pixels that the matching compares. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
-    static let holdHelp = "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the centroid of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints."
-    static let smoothingHelp = "The centroid of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back."
+    static let holdHelp = "Image matching follows the cells. When the cells move through the body, the summed steps slowly carry the frame away and slowly turn it. With this option the selected center of the embryo mask sets where the body sits, and the slow turning stays as it was acquired. The matching still removes the jumps and the sudden turns between neighbouring timepoints."
+    static let smoothingHelp = "The selected center of the mask and the summed turn are averaged over about this many timepoints. A small number follows the mask closely and passes on its wobble. A large number is steadier, and the body can then glide further before the mask pulls it back."
     static let rotationHelp = "Image matching also tries small turns between neighbouring timepoints and removes the sudden ones. With this off the matching only shifts, and the image is never turned."
     static let angleHelp = "The matching tries turns up to this angle between two neighbouring timepoints."
     static let zFollowHelp = "The pixels whose pattern must stay in the same slice. Whole frame uses every pixel that holds data. Embryo mask uses the pixels inside the mask. A box uses the cells inside a box drawn on the first timepoint."
@@ -157,6 +158,12 @@ struct AlignView: View {
                 Toggle("Hold the body in place with the embryo mask", isOn: $hold).toggleStyle(.checkbox)
                     .help(Self.holdHelp)
                 if hold {
+                    Picker("Mask metric:", selection: $maskMetric) {
+                        Text("Centroid").tag(MaskMetric.centroid)
+                        Text("Median").tag(MaskMetric.median)
+                    }
+                    .pickerStyle(.menu)
+                    .help("Centroid uses the mean X and Y coordinates of the mask pixels. Median uses the median of each coordinate, reducing the influence of small areas far from the body.")
                     LabeledContent("Averaging (timepoints):") { TextField("", value: $smoothing, format: .number).frame(width: 80) }
                         .help(Self.smoothingHelp)
                 }
@@ -325,6 +332,7 @@ struct AlignView: View {
         }
         o.xyMatching.region = r
         o.xyMatching.holdInPlace = hold
+        o.xyMatching.maskMetric = maskMetric
         o.xyMatching.smoothing = smoothing
         o.xyMatching.maximumAngle = correctRotation ? maximumAngle : 0
         if doesZ { o.zCorrection = z }

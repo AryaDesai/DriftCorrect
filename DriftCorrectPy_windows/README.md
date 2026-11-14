@@ -100,3 +100,7 @@ Run `python -m pytest tests`. The tests build a small synthetic movie and check 
 ## Packaging
 
 `drift_correct.py` imports every tool explicitly, so Nuitka and PyInstaller find all modules. Keep `ffmpeg.nuitka-package.config.yml` next to it for Nuitka builds. CuPy adds approximately 1 GB to a packaged build. To make a CPU-only build, do not install CuPy in the build environment.
+
+In Alignment → Advanced options → XY, **Mask metric** selects **Centroid**
+(the default, mean X and Y of the mask pixels) or **Median** (median X and Y).
+It controls the mask center used when holding the body in place.

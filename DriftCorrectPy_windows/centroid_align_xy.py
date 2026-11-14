@@ -60,6 +60,9 @@ def parse_args(argv=None):
     parser.add_argument("--xy_no_hold", action="store_true",
                         help="Do not hold the body in place with the embryo mask. The frame can then slowly travel "
                              "when the cells move through the body.")
+    parser.add_argument("--xy_mask_metric", choices=("centroid", "median"), default="centroid",
+                        help="The mask center used to hold the body in place (default: centroid). Median uses the "
+                             "median X and Y coordinates of the mask pixels.")
     parser.add_argument("--xy_smoothing", type=float, default=10.0,
                         help="The number of timepoints over which the position of the body and the turn are averaged "
                              "(default: 10).")
@@ -177,7 +180,7 @@ def align(args):
         raise ValueError("These settings need an embryo mask, and no threshold YAML file was given.")
     if image:
         log(f"  XY: image matching of {channel_name(xy_channel)} (index {xy_channel}), following {describe_follow(xy_follow)}")
-        log(f"      The centroid of the embryo mask holds the body in place, averaged over {args.xy_smoothing:g} timepoints." if hold
+        log(f"      The {args.xy_mask_metric} of the embryo mask holds the body in place, averaged over {args.xy_smoothing:g} timepoints." if hold
             else "      The body is not held in place.")
         # The matching runs on the GPU when the backend does.
         xp, nd = image_match.modules(backend.is_gpu)
@@ -266,7 +269,7 @@ def align(args):
                         if image:
                             previous = (current, mask)
                             steps[p].append(step)
-                            poses[p].append(image_match.pose(mask) if hold and mask is not None else None)
+                            poses[p].append(image_match.pose(mask, args.xy_mask_metric) if hold and mask is not None else None)
                         else:
                             shifts[p].append((0.0, 0.0))
                         if unaligned:

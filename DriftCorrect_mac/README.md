@@ -66,7 +66,7 @@ The later image is slid over the earlier one, and in xy it is also turned by can
 
 The region can be the whole frame, the embryo mask, or a box that you draw over cells that should stay still. The embryo mask needs the threshold YAML file from the Mask tool. A box is drawn on the first timepoint before the alignment, and the tool moves it along with the tissue.
 
-A match with a mismatch above 0.27 is marked `[weak match]` in the log. Such a timepoint is worth a look, because a wrong step moves every later timepoint by the same amount.
+A match is marked `[weak match]` in the log when it is not clearly better than a wrong placement. The search tries many placements of the same two timepoints, and most of them are wrong, so the median of their mismatches is the mismatch of two images that do not match. A match is weak when its mismatch is above 0.65 of that median. The mismatch of images that do not match depends on the pattern, and it is much lower for membranes than for nuclei, so the limit is taken from the two timepoints themselves. A weak timepoint is worth a look, because a wrong step moves every later timepoint by the same amount.
 
 ## XY alignment
 
@@ -217,3 +217,7 @@ Sources/DriftCorrectApp/  SwiftUI app
 Tests/              parity tests against the Python outputs, Metal-vs-CPU tests
 scripts/            reference-data generator, ND2 dump, comparison and build scripts
 ```
+
+In Alignment → Advanced options → XY, **Mask metric** selects **Centroid**
+(the default, mean X and Y of the mask pixels) or **Median** (median X and Y).
+It controls the mask center used when holding the body in place.

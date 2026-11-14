@@ -65,8 +65,31 @@ public struct BodyPose: Sendable {
 /// The microscope does not turn, so the direction in the acquired movie is the direction of the body. The anchor
 /// removes the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 public enum Anchor {
-    /// Measure the centroid of a mask. The result is nil when the mask is empty.
-    public static func pose(of mask: Mask2D) -> BodyPose? {
+    /// Measure the mask center. Median uses each coordinate independently. Empty masks return nil.
+    public static func pose(of mask: Mask2D, metric: MaskMetric = .centroid) -> BodyPose? {
+        if metric == .median {
+            // Coordinate counts avoid collecting and sorting all foreground pixels.
+            var rows = [Int](repeating: 0, count: mask.height)
+            var columns = [Int](repeating: 0, count: mask.width)
+            var count = 0
+            for y in 0..<mask.height {
+                for x in 0..<mask.width where mask.bits[y * mask.width + x] {
+                    rows[y] += 1; columns[x] += 1; count += 1
+                }
+            }
+            guard count > 0 else { return nil }
+            func median(_ counts: [Int]) -> Double {
+                let lower = (count - 1) / 2, upper = count / 2
+                var cumulative = 0, lo = 0
+                for (coordinate, n) in counts.enumerated() {
+                    if cumulative <= lower && cumulative + n > lower { lo = coordinate }
+                    cumulative += n
+                    if cumulative > upper { return Double(lo + coordinate) / 2 }
+                }
+                preconditionFailure("Mask coordinate counts must equal the foreground count")
+            }
+            return BodyPose(x: median(columns), y: median(rows))
+        }
         var n = 0.0, sx = 0.0, sy = 0.0
         for y in 0..<mask.height {
             for x in 0..<mask.width where mask.bits[y * mask.width + x] { n += 1; sx += Double(x); sy += Double(y) }

@@ -56,8 +56,20 @@ public struct ZPlan: Equatable, Sendable {
 /// two stacks differ least is the movement of the tissue. The correction then moves whole slices and fills the gaps
 /// with empty slices. It does not interpolate between slices.
 public enum ZDrift {
-    /// A match with a mismatch above this value is flagged in the log and the table.
-    static let weakCost = 0.27
+    /// A match is weak when its mismatch is above this share of the typical mismatch of the same two timepoints,
+    /// as `isWeak` describes.
+    static let weakShare = 0.65
+
+    /// Say whether a match is too weak to trust. `best` is the mismatch of the match, and `tried` holds the mismatch
+    /// of every placement that the search tried for the same two timepoints. Most of those placements are wrong,
+    /// so their median is the mismatch of two images that do not match. A real match lies well below it, and a
+    /// match close to it is no better than a wrong placement. A fixed limit cannot do this, because the mismatch
+    /// of images that do not match depends on the pattern. It is much lower for membranes than for nuclei.
+    static func isWeak(best: Double, tried: [Double]) -> Bool {
+        let finite = tried.filter { $0.isFinite }.sorted()
+        guard best.isFinite, !finite.isEmpty else { return true }
+        return best > weakShare * finite[finite.count / 2]
+    }
 
     /// Reduce one timepoint to the data that the comparison with another timepoint needs. `region` marks the
     /// pixels of the frame to follow, and without it the whole frame is followed. `transform` moves the timepoint
@@ -368,19 +380,21 @@ public enum ZDrift {
             step.flag = "no data in the region"
             return step
         }
+        // Measure the mismatch at every offset with the xy shift that was found. The offsets far from the best one
+        // show how large the mismatch is when the two stacks do not match, which `isWeak` needs.
+        let every = costCurve(a: a.planes, b: b.planes, z: Z, h: a.h, w: a.w, validA: a.valid, validB: b.valid,
+                              regionA: a.region, regionB: b.region, sy: found.sy, sx: found.sx, ds: ds, minPixels: 64)
         // Fit a parabola through the mismatch at the best offset and at its two neighbours to place the minimum
-        // between slices.
-        let three = costCurve(a: a.planes, b: b.planes, z: Z, h: a.h, w: a.w, validA: a.valid, validB: b.valid,
-                              regionA: a.region, regionB: b.region, sy: found.sy, sx: found.sx,
-                              ds: [found.d - 1, found.d, found.d + 1], minPixels: 64)
+        // between slices. `ds` starts at -limit, so offset d is at index d + limit.
         var dz = Double(found.d)
-        if three[0].isFinite && three[2].isFinite && abs(found.d) < limit {
-            let den = three[0] - 2 * three[1] + three[2]
-            if den > 0 { dz += min(0.5, max(-0.5, 0.5 * (three[0] - three[2]) / den)) }
+        if abs(found.d) < limit {
+            let lower = every[found.d + limit - 1], upper = every[found.d + limit + 1]
+            let den = lower - 2 * found.cost + upper
+            if lower.isFinite && upper.isFinite && den > 0 { dz += min(0.5, max(-0.5, 0.5 * (lower - upper) / den)) }
         }
         step.dz = dz
         step.cost = found.cost
-        if found.cost > weakCost { step.flag = "weak match" }
+        if isWeak(best: found.cost, tried: every) { step.flag = "weak match" }
         return step
     }
 

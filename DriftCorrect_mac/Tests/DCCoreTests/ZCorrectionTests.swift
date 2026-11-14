@@ -352,6 +352,24 @@ final class ZCorrectionTests: XCTestCase {
         }
     }
 
+    func testMaskMetrics() {
+        let examples: [([(Int, Int)], Double, Double)] = [
+            ([(0, 0), (0, 1), (0, 2), (1, 1), (4, 8)], 1, 0),
+            ([(0, 0), (1, 1), (2, 4), (4, 8)], 2.5, 1.5)
+        ]
+        for (points, x, y) in examples {
+            var mask = Mask2D(width: 9, height: 5)
+            for (row, column) in points { mask.bits[row * mask.width + column] = true }
+            let median = Anchor.pose(of: mask, metric: .median)!
+            XCTAssertEqual(median.x, x)
+            XCTAssertEqual(median.y, y)
+            let centroid = Anchor.pose(of: mask)!
+            XCTAssertEqual(centroid.x, Double(points.reduce(0) { $0 + $1.1 }) / Double(points.count))
+            XCTAssertEqual(centroid.y, Double(points.reduce(0) { $0 + $1.0 }) / Double(points.count))
+        }
+        XCTAssertNil(Anchor.pose(of: Mask2D(width: 9, height: 5), metric: .median))
+    }
+
     func testAnchorHoldsTheBody() {
         // The cells move through the body by 1 pixel and turn by half a degree at every step, and at timepoint 10
         // the stage jumps by 20 pixels. The body itself does not move or turn apart from that jump.
