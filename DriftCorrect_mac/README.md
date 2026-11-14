@@ -39,6 +39,7 @@ dc align P0_concat.ome.tif --yaml P0_Venus_threshold.yaml --z-correct [--z-chann
 dc correct-z P0_concat_xy.ome.tif [--z-channel NAME] [--yaml P0_Venus_threshold.yaml] [--no_enlarge_stack] [--low_memory]
 dc export P0_concat_xy_z.ome.tif [--channel NAME] [--slice 9] [--compare P0_concat.ome.tif] [--fps 2] [--contrast movie|frame] [--codec hevc|h264] [--quality 65]
 dc nd2-info file.nd2 --checksums          # metadata and frame checksums as JSON
+dc accuracy P0_concat.ome.tif [--channel NAME] [--pairs 12]   # measures the error of the matching on a real movie
 dc bench                                  # CPU vs Metal timing
 ```
 
@@ -59,7 +60,7 @@ With the default settings, XYZ and XY only use the mask to hold the body in plac
 
 ## Image matching
 
-Image matching is how z correction measures drift, and it is one of the two ways the Align tool can measure drift in xy. It compares each timepoint with the timepoint before it.
+Image matching is how the Align tool measures drift in xy and in z. It compares each timepoint with the timepoint before it.
 
 The later image is slid over the earlier one, and in xy it is also turned by candidate angles. For every offset, the tool takes the pixels that both images hold inside the region it follows, scales both sides to the same mean so that bleaching does not count, and adds up the absolute differences. That sum divided by the sum of both images is the mismatch, which is 0 for identical images and 1 for images with nothing in common. The offset with the smallest mismatch is the movement between the two timepoints. A turn is accepted only when it lowers the mismatch by a clear margin compared with no turn, because a turned image is interpolated and that alone can lower the mismatch slightly.
 
@@ -70,6 +71,10 @@ A match with a mismatch above 0.27 is marked `[weak match]` in the log. Such a t
 ## XY alignment
 
 Image matching compares each timepoint with the one before it, as the section above describes, on the maximum projection of the chosen channel. The search starts on a copy binned until its longer side is at most 128 pixels, across half the frame in each direction, so that the jump after the embryo was centred again is found. It then refines the shift and the angle on copies binned by 2 and at full resolution.
+
+The search stops at whole pixels and at steps of the angle. On the full-resolution copy, the tool then compares the mismatch one pixel to each side of the best shift and one angle step to each side of the best angle. A parabola through the three values places the shift and the angle between those steps. An angle of 0 is left alone, so that a movie without turns is not turned.
+
+`dc accuracy FILE` measures the error of the matching on a real movie. It moves timepoints by a known shift, turn and z offset, matches the moved copies, and reports how far the answers are from the known moves. It writes nothing. On one test movie, placing the shift and the angle between steps brought the mean error of the shift at the frame centre from 0.37 to 0.04 pixels, and at the frame corner from 0.66 to 0.14 pixels. Run it on your own movie before and after a change to the matching.
 
 ### Holding the body in place
 

@@ -194,13 +194,28 @@ def _search(la, lb, region, count, cy, cx, ry, rx, xp):
     return best
 
 
+def _between(lower, best, upper):
+    """Place the minimum of the mismatch between three samples that are one step apart. A parabola through the
+    mismatch at the best sample and at its two neighbours gives the position, as a part of a step from the best
+    sample. The z comparison places the minimum between slices in the same way. The result is 0 when a neighbour
+    has no value or the three values do not curve upward."""
+    if not (math.isfinite(lower) and math.isfinite(upper)):
+        return 0.0
+    curve = lower - 2 * best + upper
+    return min(0.5, max(-0.5, 0.5 * (lower - upper) / curve)) if curve > 0 else 0.0
+
+
 def match(a, b, region=None, maximum_angle=0.0, xp=np, nd=ndimage):
     """Return the transform that moves `b`, the later timepoint, onto `a`, the earlier one, and the mismatch
-    there. The transform turns `b` about the centre of the frame and then shifts it by whole pixels. `region` is
-    in pixels of `a` at full resolution, and without it the whole frame is used. Angles up to `maximum_angle`
-    degrees in either direction are tried. With 0 the match only shifts."""
+    there. The transform turns `b` about the centre of the frame and then shifts it. The search finds the shift in
+    whole pixels and the angle in steps. On the finest copy, the mismatch at the neighbouring angles and pixels
+    then places both between those steps, which makes the result finer than the steps of the search. `region` is in
+    pixels of `a` at full resolution, and without it the whole frame is used. Angles up to `maximum_angle` degrees in either direction
+    are tried. With 0 the match only shifts."""
     whole = xp.ones((a.height, a.width), dtype=bool) if region is None else xp.asarray(region)
     best, angle, step, previous_bin = (0, 0, math.inf), 0.0, ANGLE_STEP, 0
+    # This holds the part of the shift that lies between whole pixels, measured on the finest copy.
+    fraction_y = fraction_x = 0.0
     for la, lb in zip(a.levels, b.levels):
         r = _binned_region(whole, la.bin, xp)
         count = int((r & la.valid).sum())
@@ -241,8 +256,31 @@ def match(a, b, region=None, maximum_angle=0.0, xp=np, nd=ndimage):
             else:
                 return np.eye(3), math.nan
         previous_bin = la.bin
+        if la.bin != 1:
+            continue
+        # The search stops at the angle step of the finest copy. When a turn was found, compare one step to each
+        # side of it and take the angle of the minimum between them. An angle of 0 is left alone, because the turn
+        # margin decided that there is no turn.
+        if angle != 0:
+            def near(degrees):
+                return _search(la, _rotated(lb, degrees, a, xp, nd), r, count, best[0], best[1], 1, 1, xp)
+
+            part = _between(near(angle - step)[2], best[2], near(angle + step)[2])
+            if part != 0:
+                refined = near(angle + step * part)
+                if math.isfinite(refined[2]):
+                    best, angle = refined, angle + step * part
+        # The search also stops at whole pixels. Compare one pixel to each side of the best offset, with the angle
+        # that was found, and take the position of the minimum between them.
+        moved = lb if angle == 0 else _rotated(lb, angle, a, xp, nd)
+
+        def beside(dy, dx):
+            return _search(la, moved, r, count, best[0] + dy, best[1] + dx, 0, 0, xp)[2]
+
+        fraction_y = _between(beside(-1, 0), best[2], beside(1, 0))
+        fraction_x = _between(beside(0, -1), best[2], beside(0, 1))
     turn = rotation(angle, (a.width - 1) / 2, (a.height - 1) / 2)
-    return shift(best[1], best[0]) @ turn, best[2]
+    return shift(best[1] + fraction_x, best[0] + fraction_y) @ turn, best[2]
 
 
 def region(follow, mask, to_first, width, height):

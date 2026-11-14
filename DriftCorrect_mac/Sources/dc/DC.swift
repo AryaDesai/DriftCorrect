@@ -13,7 +13,7 @@ struct DC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dc",
         abstract: "Embryo drift-correction tools (Apple silicon).",
-        subcommands: [Convert.self, Align.self, CorrectZ.self, Export.self, ND2Info.self, Bench.self])
+        subcommands: [Convert.self, Align.self, CorrectZ.self, Export.self, Accuracy.self, ND2Info.self, Bench.self])
 }
 
 struct BackendOption: ParsableArguments {
@@ -315,6 +315,39 @@ struct Export: ParsableCommand {
         let start = Date()
         _ = try ExportPipeline.run(options: o, backend: backend.make(), movies: MovieFileFactory(codec: c, quality: quality),
                                    context: consoleContext())
+        print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
+    }
+}
+
+struct Accuracy: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Measure how well the xy and z matching recover known moves on a real movie. Nothing is written.")
+
+    @Argument(help: "An OME-TIFF or ND2 file.")
+    var movie: String
+
+    @Option(help: "The channel to match, given as a name or as an index that starts at 0 (default: the first channel).")
+    var channel: String?
+
+    @Option(help: "The number of timepoints to test, spread evenly over the movie (default: 12).")
+    var pairs = 12
+
+    @Option(name: [.customLong("xy-max-angle"), .customLong("xy_max_angle")],
+            help: "The largest turn that the matching looks for, in degrees (default: 3). With 0 the matching only shifts.")
+    var xyMaxAngle = 3.0
+
+    @OptionGroup var backend: BackendOption
+
+    func run() throws {
+        var o = AccuracyCheck.Options(source: URL(fileURLWithPath: movie))
+        (o.channelIndex, o.channelName) = parseChannel(channel)
+        guard pairs >= 1, xyMaxAngle >= 0 else {
+            throw ValidationError("--pairs must be 1 or more, and --xy-max-angle must be 0 or more")
+        }
+        o.pairs = pairs
+        o.maximumAngle = xyMaxAngle
+        let start = Date()
+        try AccuracyCheck.run(options: o, backend: backend.make(), context: consoleContext())
         print(String(format: "Finished in %.1f s", Date().timeIntervalSince(start)))
     }
 }

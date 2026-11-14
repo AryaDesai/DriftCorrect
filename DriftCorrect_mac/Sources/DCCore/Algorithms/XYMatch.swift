@@ -190,8 +190,21 @@ public enum XYMatch {
     /// image is interpolated, which smooths it slightly and can lower the mismatch without a real turn.
     static let turnMargin = 0.02
 
+    /// Place the minimum of the mismatch between three samples that are one step apart. A parabola through the
+    /// mismatch at the best sample and at its two neighbours gives the position, as a part of a step from the best
+    /// sample. The z comparison places the minimum between slices in the same way. The result is 0 when a neighbour
+    /// has no value or the three values do not curve upward.
+    static func between(_ lower: Double, _ best: Double, _ upper: Double) -> Double {
+        guard lower.isFinite, upper.isFinite else { return 0 }
+        let curve = lower - 2 * best + upper
+        return curve > 0 ? min(0.5, max(-0.5, 0.5 * (lower - upper) / curve)) : 0
+    }
+
     /// Return the transform that moves `b`, the later timepoint, onto `a`, the earlier one, and the mismatch there.
-    /// The transform turns `b` about the centre of the frame and then shifts it by whole pixels. `region` is in
+    /// The transform turns `b` about the centre of the frame and then shifts it. The search finds the shift in whole
+    /// pixels and the angle in steps. On the finest copy, the mismatch at the neighbouring angles and pixels then
+    /// places both between those steps, which makes the result finer than the steps of the search. `dc accuracy`
+    /// measures the error that remains on a real movie. `region` is in
     /// pixels of `a` at full resolution, and without it the whole frame is used. Angles up to `maximumAngle` degrees
     /// in either direction are tried. With 0 the match only shifts.
     public static func match(_ a: XYFrame, _ b: XYFrame, region: [Bool]? = nil, maximumAngle: Double = 0) -> (step: Rigid, cost: Double) {
@@ -200,6 +213,8 @@ public enum XYMatch {
         var best = (dy: 0, dx: 0, cost: Double.infinity)
         var angle = 0.0, step = angleStep
         var previousBin = 0
+        // This holds the part of the shift that lies between whole pixels, measured on the finest copy.
+        var fraction = (dy: 0.0, dx: 0.0)
         for (la, lb) in zip(a.levels, b.levels) {
             let r = binned(whole, w: W, h: H, by: la.bin)
             var count = 0
@@ -242,9 +257,30 @@ public enum XYMatch {
                 }
             }
             previousBin = la.bin
+            guard la.bin == 1 else { continue }
+            // The search stops at the angle step of the finest copy. When a turn was found, compare one step to each
+            // side of it and take the angle of the minimum between them. An angle of 0 is left alone, because the
+            // turn margin decided that there is no turn.
+            if angle != 0 {
+                func near(_ degrees: Double) -> (dy: Int, dx: Int, cost: Double) {
+                    search(la, turned(degrees), region: r, regionCount: count, cy: best.dy, cx: best.dx, ry: 1, rx: 1)
+                }
+                let part = between(near(angle - step).cost, best.cost, near(angle + step).cost)
+                if part != 0 {
+                    let refined = near(angle + step * part)
+                    if refined.cost.isFinite { best = refined; angle += step * part }
+                }
+            }
+            // The search also stops at whole pixels. Compare one pixel to each side of the best offset, with the
+            // angle that was found, and take the position of the minimum between them.
+            let moved = angle == 0 ? lb : turned(angle)
+            func beside(_ dy: Int, _ dx: Int) -> Double {
+                cost(la, moved, region: r, regionCount: count, dy: best.dy + dy, dx: best.dx + dx)
+            }
+            fraction = (between(beside(-1, 0), best.cost, beside(1, 0)), between(beside(0, -1), best.cost, beside(0, 1)))
         }
         let turn = Rigid.rotation(degrees: angle, aboutX: Double(W - 1) / 2, y: Double(H - 1) / 2)
-        return (Rigid.shift(dx: Double(best.dx), dy: Double(best.dy)).after(turn), best.cost)
+        return (Rigid.shift(dx: Double(best.dx) + fraction.dx, dy: Double(best.dy) + fraction.dy).after(turn), best.cost)
     }
 
     /// Return the pixels of one timepoint that the matching compares, or nil for the whole frame. `mask` is the

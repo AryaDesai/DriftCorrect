@@ -320,10 +320,13 @@ final class ZCorrectionTests: XCTestCase {
         let a = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0).floatPlane(6)))
         for (dy, dx) in [(0, 0), (3, -2), (-17, 25), (38, -41)] {
             let b = XYMatch.prepare(Image2D(width: Self.size, height: Self.size, pixels: frame(offset: 0, dy: dy, dx: dx).floatPlane(6)))
-            // A pure shift is found exactly, also when angles are tried.
+            // A pure shift is found without a turn, also when angles are tried. The shift is placed between pixels,
+            // so a move by whole pixels is found to within a small part of one.
             for maximumAngle in [0.0, 3.0] {
                 let m = XYMatch.match(a, b, maximumAngle: maximumAngle)
-                XCTAssertEqual(m.step, Rigid.shift(dx: Double(-dx), dy: Double(-dy)), "move \(dy), \(dx)")
+                XCTAssertEqual(m.step.degrees, 0, "move \(dy), \(dx)")
+                XCTAssertEqual(m.step.tx, Double(-dx), accuracy: 0.01, "move \(dy), \(dx)")
+                XCTAssertEqual(m.step.ty, Double(-dy), accuracy: 0.01, "move \(dy), \(dx)")
                 XCTAssertLessThan(m.cost, 0.1)
             }
         }
@@ -400,19 +403,21 @@ final class ZCorrectionTests: XCTestCase {
             let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
             // Every timepoint moves back onto the first one.
             for (t, m) in moves.enumerated() {
-                XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0), "t\(t) \(region)")
-                XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1), "t\(t) \(region)")
+                XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0), accuracy: 0.01, "t\(t) \(region)")
+                XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1), accuracy: 0.01, "t\(t) \(region)")
             }
             // In the output, every timepoint shows the scene in the same place, apart from the pixels that its move
-            // uncovered.
+            // uncovered. The output is interpolated, so the values agree closely without being equal.
             let out = try TIFFStack(url: r.tiffs[0])
             let first = try out.readFrame(0).floatPlane(6)
             for t in 1..<moves.count {
                 let plane = try out.readFrame(t).floatPlane(6)
-                var same = 0, compared = 0
-                for i in plane.indices where plane[i] > 0 && first[i] > 0 { compared += 1; if plane[i] == first[i] { same += 1 } }
+                var difference = 0.0, total = 0.0, compared = 0
+                for i in plane.indices where plane[i] > 0 && first[i] > 0 {
+                    compared += 1; difference += Double(abs(plane[i] - first[i])); total += Double(first[i])
+                }
                 XCTAssertGreaterThan(compared, 10_000, "t\(t) \(region)")
-                XCTAssertEqual(same, compared, "t\(t) \(region)")
+                XCTAssertLessThan(difference / total, 0.02, "t\(t) \(region)")
             }
         }
     }
@@ -426,18 +431,25 @@ final class ZCorrectionTests: XCTestCase {
         opts.zCorrection = ZCorrectionOptions()
         let r = try AlignPipeline(options: opts, backend: CPUBackend(), movies: nil, context: .silent()).run()
         XCTAssertEqual(r.zPlans[0].shift, offsets)
-        for (t, m) in moves.enumerated() { XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0)); XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1)) }
+        // The stacks start at different depths, so their projections differ slightly and the shift is found to within
+        // a few hundredths of a pixel.
+        for (t, m) in moves.enumerated() {
+            XCTAssertEqual(r.shifts[0][t].dy, Double(-m.0), accuracy: 0.05)
+            XCTAssertEqual(r.shifts[0][t].dx, Double(-m.1), accuracy: 0.05)
+        }
         // After both corrections, a given output slice shows the same scene plane at every timepoint, apart from
-        // the pixels that the xy move uncovered.
+        // the pixels that the xy move uncovered. The output is interpolated, so the values agree closely.
         let out = try TIFFStack(url: r.tiffs[0])
         let k = r.zPlans[0].padLow + 6
         let first = try out.readFrame(0).floatPlane(k)
         for t in 1..<offsets.count {
             let plane = try out.readFrame(t).floatPlane(k)
-            var same = 0, compared = 0
-            for i in plane.indices where plane[i] > 0 && first[i] > 0 { compared += 1; if plane[i] == first[i] { same += 1 } }
+            var difference = 0.0, total = 0.0, compared = 0
+            for i in plane.indices where plane[i] > 0 && first[i] > 0 {
+                compared += 1; difference += Double(abs(plane[i] - first[i])); total += Double(first[i])
+            }
             XCTAssertGreaterThan(compared, 10_000, "t\(t)")
-            XCTAssertEqual(same, compared, "t\(t)")
+            XCTAssertLessThan(difference / total, 0.02, "t\(t)")
         }
     }
 

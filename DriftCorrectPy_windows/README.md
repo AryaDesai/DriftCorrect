@@ -42,7 +42,7 @@ The Alignment window has three tabs. **XYZ** corrects the movie in xy and then i
 
 **Advanced options** holds the settings that change how the correction works. Each one shows an explanation when the pointer rests on it.
 
-The xy alignment compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. The centroid of the embryo mask, averaged over nearby timepoints, then decides where the body sits. Sudden turns are removed, and slow turning stays as it was acquired. The cells can move inside the body while the body stays put.
+The xy alignment compares each timepoint with the one before it. It tries shifts and small turns and keeps the one where the two images differ least. The search stops at whole pixels and at steps of the angle, and the mismatch at the neighbouring pixels and angles then places both between those steps. The centroid of the embryo mask, averaged over nearby timepoints, then decides where the body sits. Sudden turns are removed, and slow turning stays as it was acquired. The cells can move inside the body while the body stays put.
 
 Image matching can follow the whole frame, the embryo mask, or a box given as `x, y, width, height` in pixels of the first timepoint.
 

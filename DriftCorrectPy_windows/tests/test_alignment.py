@@ -73,7 +73,8 @@ def test_match_finds_large_jumps():
     for dy, dx in ((0, 0), (3, -2), (-17, 25), (38, -41)):
         for maximum_angle in (0.0, 3.0):
             step, cost = image_match.match(a, image_match.prepare(frame(0, dy, dx)[0, 6]), maximum_angle=maximum_angle)
-            assert np.array_equal(step, image_match.shift(-dx, -dy))
+            # The shift is placed between pixels, so a move by whole pixels is found to within a small part of one.
+            assert np.allclose(step, image_match.shift(-dx, -dy), atol=0.01)
             assert cost < 0.1
 
 
@@ -133,9 +134,11 @@ def test_plan_and_place():
 
 
 def same_scene(first, plane):
-    """Return the share of the pixels that hold data in both planes and have the same value."""
+    """Return the number of pixels that hold data in both planes, and how much the two planes differ there as a
+    share of their brightness. The output is interpolated, so the values agree closely without being equal."""
     both = (first > 0) & (plane > 0)
-    return both.sum(), (first[both] == plane[both]).mean()
+    a, b = first[both].astype(float), plane[both].astype(float)
+    return both.sum(), np.abs(a - b).sum() / a.sum()
 
 
 def test_image_matching_with_z_correction(tmp_path):
@@ -145,13 +148,15 @@ def test_image_matching_with_z_correction(tmp_path):
     for region in (["--xy_region", "whole"], ["--xy_region", "mask"], ["--xy_region", "box", "--xy_box", "40", "40", "80", "80"]):
         out, shifts = run(yaml, "--xy_no_hold", "--z_correct", *region)
         # Every timepoint moves back onto the first one, in xy and in z.
-        assert np.allclose(shifts[0], [(-dy, -dx) for dy, dx in moves])
+        # The stacks start at different depths, so their projections differ slightly and the shift is found to
+        # within a few hundredths of a pixel.
+        assert np.allclose(shifts[0], [(-dy, -dx) for dy, dx in moves], atol=0.05)
         # The last timepoint moves down by one slice, so one empty slice is added below and scene plane 6 of the
         # first timepoint is in output slice 7.
         k = 7
         for t in range(1, len(offsets)):
-            compared, same = same_scene(out[0, 0, k], out[t, 0, k])
-            assert compared > 10_000 and same == 1.0
+            compared, difference = same_scene(out[0, 0, k], out[t, 0, k])
+            assert compared > 10_000 and difference < 0.02
 
 
 def test_image_matching_holds_the_body(tmp_path):
