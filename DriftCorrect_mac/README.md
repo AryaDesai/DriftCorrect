@@ -7,7 +7,7 @@ This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `f
 `centroid_align_xy.py`, and their GUIs). It contains:
 
 - **DriftCorrect.app**: a SwiftUI app. The launcher opens three windows, Convert ND2 to TIFF, Align movie and Export movies. The Mask window opens from the Alignment window when a run needs the embryo mask.
-- **dc**: a command-line tool. `dc convert` and `dc align` accept the same arguments as the Python workers in the general version
+- **dc**: a command-line tool. `dc convert` and `dc align` 
 
 ## Requirements
 
@@ -19,15 +19,12 @@ This is a Swift port of the embryo drift-correction scripts (`nd2_to_tif.py`, `f
 
 ```bash
 cd DriftCorrect
-scripts/build_and_test.sh      # builds, runs all tests and a benchmark → build/report.txt
+scripts/build_and_test.sh      # builds, runs all tests and a benchmark qwhich outputs to build/report.txt
 scripts/bundle_app.sh          # makes build/DriftCorrect.app and build/dc
 ```
 
-The first build downloads two packages from GitHub: Yams (YAML) and swift-argument-parser.
+The first build downloads Yams (YAML) and swift-argument-parser from GitHub.
 
-If the build or a test fails, send `build/report.txt`.
-
-To work in Xcode, open `Package.swift`, select the `DriftCorrectApp` scheme, and run.
 
 ## Command line
 
@@ -54,17 +51,17 @@ The Alignment window has three tabs. **XYZ** corrects the movie in xy and then i
 3. When the settings use the embryo mask, an **Embryo mask** row appears. **Make mask…** opens the Mask window on the movie and starts from a threshold estimated from the image. Saving there writes the YAML file next to the movie and fills in the row. A YAML file saved earlier next to the movie is found automatically.
 4. Run.
 
-With the default settings, XYZ and XY only use the mask to hold the body in place, and Z only does not need it.
+With the default settings, XYZ and XY only use the mask to hold the body in place and Z does not need it.
 
-**Advanced options** holds the settings that change how the correction works. Each one shows an explanation when the pointer rests on it.
+**Advanced options** holds the settings that change how the correction works.
 
 ## Image matching
 
 Image matching is how the Align tool measures drift in xy and in z. It compares each timepoint with the timepoint before it.
 
-The later image is slid over the earlier one, and in xy it is also turned by candidate angles. For every offset, the tool takes the pixels that both images hold inside the region it follows, scales both sides to the same mean so that bleaching does not count, and adds up the absolute differences. That sum divided by the sum of both images is the mismatch, which is 0 for identical images and 1 for images with nothing in common. The offset with the smallest mismatch is the movement between the two timepoints. A turn is accepted only when it lowers the mismatch by a clear margin compared with no turn, because a turned image is interpolated and that alone can lower the mismatch slightly.
+The later image is slid over the earlier one, and in xy it is also turned by candidate angles. For every offset, the tool takes the pixels that both images hold inside the region it follows, scales both sides to the same mean so that bleaching does not count, and adds up the absolute differences. That divided by the sum of both images is the mismatch, which is 0 for identical images and 1 for images with nothing in common. The offset with the smallest mismatch is estimated to be the movement between timepoints. A turn is accepted only when it lowers the mismatch by a clear margin compared with no turn.
 
-The region can be the whole frame, the embryo mask, or a box that you draw over cells that should stay still. The embryo mask needs the threshold YAML file from the Mask tool. A box is drawn on the first timepoint before the alignment, and the tool moves it along with the tissue.
+The region can be the whole frame, the embryo mask, or a box that you draw over cells that should stay still. The embryo mask needs the threshold YAML file from the Mask tool. A box is drawn on the first timepoint before the alignment and the tool moves it along with the tissue.
 
 A match is marked `[weak match]` in the log when it is not clearly better than a wrong placement. The search tries many placements of the same two timepoints, and most of them are wrong, so the median of their mismatches is the mismatch of two images that do not match. A match is weak when its mismatch is above 0.65 of that median. The mismatch of images that do not match depends on the pattern, and it is much lower for membranes than for nuclei, so the limit is taken from the two timepoints themselves. A weak timepoint is worth a look, because a wrong step moves every later timepoint by the same amount.
 
@@ -80,7 +77,7 @@ The search stops at whole pixels and at steps of the angle. On the full-resoluti
 
 Image matching follows the cells. When the cells move through the body, as they do in a growing tail, the sum of the steps slowly carries the frame away from where it started. The output then shows the frame travelling across an empty canvas.
 
-With **Hold the body in place with the embryo mask**, which is on by default, the tool uses the mask to say where the body is. It follows the centroid of the mask and averages it over nearby timepoints, because the mask is rough at a single timepoint and reliable over many. Each timepoint is then placed so that the averaged centroid sits in the middle of the frame. The sudden movement between neighbouring timepoints still comes from the image matching, so jumps and jitter are removed, and the cells are free to move inside the body.
+With **Hold the body in place with the embryo mask**, which is on by default, the tool uses the mask to say where the body is. It follows the centroid of the mask and averages it over nearby timepoints, because the mask is rough at a single timepoint and reliable over many. Each timepoint is then placed so that the averaged centroid/meidan sits in the middle of the frame. The sudden movement between neighbouring timepoints still comes from the image matching, so jumps and jitter are removed, and the cells are free to move inside the body.
 
 The direction of the body is not taken from the mask. The long axis of a mask changes when the frame cuts off a different part of the tissue, without the body turning, and following it would turn the image for no reason. The microscope does not turn, so the direction in the acquired movie is the direction of the body. The tool removes the sudden turns that the matching finds and leaves the slow turning as it was acquired.
 
@@ -113,7 +110,7 @@ The output can be much deeper than the input when the embryo was centred again s
 
 - The z channel is the channel whose pattern the tool follows. A nuclear marker is the best choice, because its pattern stays the same while a reporter that oscillates changes from one timepoint to the next. The app selects a channel whose name looks like a nuclear marker when the file has one.
 - The region is the part of the image that should stay in the same slice, as the section "Image matching" describes. The default is the whole frame. Different parts of an embryo can move differently in z, so the whole frame and the embryo mask can give different answers. On the command line the box is `--z-box x,y,width,height` in pixels of the first timepoint.
-- **Drop time points with large shifts** leaves out every timepoint that moved more than **Maximum shift (slices)** from the last kept timepoint. It starts unchecked, with a limit of 5 slices. On the command line it is `--z-drop-above 5`. The other timepoints are aligned in xy and z as if the dropped ones were never recorded. When the tissue stays at the new depth, only the first timepoint after the move is dropped. The aligned and unaligned movies leave out the same timepoints, and the input file does not change.
+- **Drop time points with large shifts** leaves out every timepoint that moved more than **Maximum shift (slices)** from the last kept timepoint. On the command line it is `--z-drop-above 5`. The other timepoints are aligned in xy and z as if the dropped ones were never recorded. When the tissue stays at the new depth, only the first timepoint after the move is dropped. The aligned and unaligned movies leave out the same timepoints, and the input file does not change.
 
 ### Outputs
 
@@ -129,21 +126,21 @@ The Convert tool stores the stage z positions from the ND2 file in the OME-TIFF 
 
 ## Export window
 
-The Export window writes MP4 movies of any OME-TIFF or ND2 file, such as the movie before alignment, the output of the alignment, or the output of the z correction. The movies are saved next to the file. Each setting shows an explanation when the pointer rests on it.
+The Export window writes MP4 movies of any OME-TIFF or ND2 file, such as the movie before alignment, the output of the alignment, or the output of the z correction. The movies are saved next to the file. 
 
-- **Channel** is all channels, which writes one movie for each channel, or a single channel.
-- **View** is the maximum projection along z, or one slice counted from 1. A single slice is the way to see z correction, because the projection along z does not change when slices move.
-- **Compare with** is an optional second file shown to the right of the first one, such as the unaligned movie next to the aligned one. The second file shows the channel with the same name. When the two files differ in length, the export stops after the shorter one.
+- **Channel** can choose all channels or a siongle channel
+- **View** is the maximum projection along z or one slice. A single slice is the way to see z correction
+- **Compare with** is an optional second file shown to the right of the first one, such as the unaligned movie next to the aligned one. The second file shows the channel with the same name. When the two files differ in length the export stops after the shorter one.
 - **Speed** is the number of frames per second. Each timepoint is one frame.
-- **Contrast** is the whole movie or each frame. With the whole movie, the brightness is set once from 20 timepoints spread over the movie, so a cell keeps its brightness from frame to frame. With each frame, every frame sets its own brightness, as the movies of the alignment do, and the movie can flicker. In both cases the brightest 0.5% of the pixels are white.
+- **Contrast** is the whole movie or each frame. With the whole movie, the brightness is set once from 20 timepoints spread over the movie, so a cell keeps its brightness from frame to frame. With each frame, every frame sets its own brightness and the movie can flicker. In both cases the brightest 0.5% of the pixels are white.
 - **Codec** is HEVC or H.264. HEVC files are about half the size. H.264 plays in more programs, such as older versions of PowerPoint.
-- **Quality** runs from 1 to 100. Higher values keep more detail and give larger files. The default is 65, which gives the same movies as before the quality could be chosen.
+- **Quality** runs from 1 to 100. Higher values keep more detail and give larger files. The default is 65
 
 A movie is named after the file, the channel and the view, for example `P0_concat_xy_z_mCherry_z9.mp4`. With a second file, `_vs_` and the name of that file are added.
 
 ## Check the ND2 reader on your own files
 
-The ND2 reader is native Swift. It was tested on synthetic files that the `nd2` package reads correctly. To check it against a real file:
+ To check it against a real file:
 
 ```bash
 python scripts/nd2_dump.py file.nd2 > python.json
@@ -161,51 +158,18 @@ python scripts/compare_tiffs.py python_out/X.ome.tif swift_out/X.ome.tif
 
 | Step | Where it runs |
 |---|---|
-| Gaussian blur | Metal, separable (2·(2r+1) taps per pixel; the Python GPU path used a full (2r+1)² kernel) |
+| Gaussian blur | Metal, separable (2·(2r+1) taps per pixel) |
 | Z max-projection, sub-pixel and whole-pixel shift | Metal, zero-copy on unified memory |
-| Percentile, labelling, Otsu, multi-Otsu | CPU, on all cores; several frames are processed at the same time |
+| Percentile, labelling, Otsu, multi-Otsu | CPU, on all cores and several frames are processed at the same time |
 | Image matching in xy and z, and the moving of slices | CPU, on all cores |
 | HEVC movies | Media engine (VideoToolbox), encoded while frames pass through |
-| TIFF / ND2 I/O | `pread` into page-aligned buffers that Metal uses without a copy; reads, compute and writes overlap |
-
-Other changes that make the pipeline faster:
-
-- The two-pass alignment keeps Pass 1 frames in memory for Pass 2 when they fit in 40% of RAM. With `--low_memory`, Pass 2 reads the frames again.
-- The movies are made during the passes. The Python code read the TIFFs again to make them.
-- The conversion reads each ND2 file once and writes all positions at the same time.
-- The Mask tool reads one frame at a time. It reads the next frame in the background.
+| TIFF / ND2 I/O | `pread` into page-aligned buffers that Metal uses without a copy |
 
 ### Numerical agreement with the Python code
 
-- **CPU implementations.** They match scipy, numpy, and OpenCV bit for bit. This includes the Gaussian, the percentile, the histogram, the labels, Otsu and multi-Otsu. The unit tests check this against data that `scripts/make_reference.py` made with the original functions.
-- **Metal kernels.** scipy calculates in float64, and Apple GPUs have no float64. For this reason, the Gaussian emulates float64 with float-float arithmetic. About 1 pixel in 250,000 is different, by 1 ulp (float32 unit in the last place).
+- **CPU implementations.** The outputs are identical to scipy, numpy, and OpenCV. This includes the Gaussian, the percentile, the histogram, the labels, Otsu and multi-Otsu. The unit tests check this against data that `scripts/make_reference.py` made with the original functions.
 - **Multi-Otsu.** It runs in float64. The Python code used float32 JAX. The thresholds agree on all test images.
 
-## Differences from the Python scripts
-
-Resolved as agreed:
-
-1. **YAML settings.** Alignment uses every YAML setting: method, invert, levels, selected classes, block size, and per-timepoint parameters. `centroid_align_xy.py` used only sigma, percentile, and channel.
-2. **Blur.** The blur always uses scipy's rules.
-
-Defects fixed:
-
-3. **Missing import.** `align_frame_xy` and the manual-shift functions used `scipy.ndimage.shift` without an import. As a result, `--no_enlarge_canvas` failed on the CPU path.
-4. **Single channel or single Z-slice.** Files with one channel or one Z-slice now load. tifffile removes singleton axes, so `T, C, Z, Y, X = series.shape` failed.
-5. **ND2 axis order.** ND2 files are read by axis name. The Python code assumed the loop order T, P, Z.
-6. **Mask tool preview.** The preview now smooths ND2 data in float32, as alignment does. Before, it smoothed uint16 data, and the result was truncated to uint16.
-
-Other changes:
-
-7. **Concatenated TIFFs** keep uint16. The values are unchanged, and the files are half the size.
-8. **Metadata warnings.** The concatenation compares channel names and calibration. The Python code compared the raw OME-XML, and it always warned, because every file has its own UUID.
-9. **File names.**
-    - The unaligned movie is `{stem}_{channel}_unaligned.mp4` in both canvas modes.
-10. **Closing a tool window** does not stop a run. Quitting the app asks for confirmation first.
-11. **Legacy ND2 files** (JPEG 2000, format 1.0) and RGB ND2 files show an error message.
-12. **Z correction.** The tools can correct drift along z, which the Python scripts in this repository do not do. The section "Z correction" above describes it.
-13. **Stage z positions.** The stage z positions from the ND2 file are stored in every OME-TIFF that the tools write.
-14. **XY alignment by image matching.** The Align tool finds the xy movement by image matching, with rotation, in place of centring the mask centroid. The section "XY alignment" above describes it.
 
 ## Code layout
 
@@ -218,6 +182,6 @@ Tests/              parity tests against the Python outputs, Metal-vs-CPU tests
 scripts/            reference-data generator, ND2 dump, comparison and build scripts
 ```
 
-In Alignment → Advanced options → XY, **Mask metric** selects **Centroid**
+In Alignment/Advanced options /XY, **Mask metric** selects **Centroid**
 (the default, mean X and Y of the mask pixels) or **Median** (median X and Y).
 It controls the mask center used when holding the body in place.
