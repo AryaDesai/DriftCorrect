@@ -158,8 +158,8 @@ python scripts/compare_tiffs.py python_out/X.ome.tif swift_out/X.ome.tif
 
 | Step | Where it runs |
 |---|---|
-| Gaussian blur | Metal, separable (2·(2r+1) taps per pixel) |
-| Z max-projection, sub-pixel and whole-pixel shift | Metal, zero-copy on unified memory |
+| Gaussian blur | Metal |
+| Z max-projection, sub-pixel and whole-pixel shift | Metal |
 | Percentile, labelling, Otsu, multi-Otsu | CPU, on all cores and several frames are processed at the same time |
 | Image matching in xy and z, and the moving of slices | CPU, on all cores |
 | HEVC movies | Media engine (VideoToolbox), encoded while frames pass through |
