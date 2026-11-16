@@ -14,15 +14,13 @@ Tools to convert ND2 files, mask embryos, align movies in XY, register in Z, and
 
 ## Start
 
-Run `python drift_correct.py`. The launcher has five buttons:
+Run `python drift_correct.py`. The launcher has a few options:
 
 | Button | Script | Output |
 |---|---|---|
 | Convert ND2 to TIFF | `nd2_to_tif.py` | `{name}_P{p}.ome.tif`, `P{p}_concat.ome.tif` |
 | Mask embryo | `find_threshold.py` | `…_threshold.yaml` next to the input |
 | Align movie | `centroid_align_xy.py` | `aligned_{base}/` with OME-TIFF and MP4 files |
-| Z alignment | `z_align.py` | `{stem}_z_shifts.csv`, `{stem}_z.ome.tif` |
-| Manual XY shift | `manual_xy.py` | `aligned_{stem}/{stem}_xy_manual.ome.tif` and MP4 files |
 
 Each script also runs from the command line. Use `--help` to see its options.
 
